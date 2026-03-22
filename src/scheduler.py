@@ -1,8 +1,8 @@
 import threading
 import time
-from . import dns_resolver
+import dns_resolver
 
-from .logger_config import logger
+from logger_config import logger
 
 def loop_task(db, sys_config):
     while True:

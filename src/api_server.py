@@ -72,7 +72,7 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Not Found")
 
-from .logger_config import logger
+from logger_config import logger
 
 def start_server(db, port=80):
     try:

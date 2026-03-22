@@ -1,7 +1,7 @@
 import threading
 import socket
 import select
-from . import database
+import database
 
 MDNS_ADDR = '224.0.0.251'
 MDNS_PORT = 5353
@@ -24,7 +24,7 @@ def _listen(db):
         
     sock.bind(('', MDNS_PORT))
     
-    from .logger_config import logger
+    from logger_config import logger
 
     # マルチキャストグループに参加
     try:
@@ -65,7 +65,7 @@ def _handle_query(db, sock, data, addr):
         # 応答パケットの構築
         response = _build_response(data, queried_hostname, ip, ttl)
         if response:
-            from .logger_config import logger
+            from logger_config import logger
             sock.sendto(response, (MDNS_ADDR, MDNS_PORT))
             logger.debug(f"[mDNS Server] Replied to {addr} for {queried_hostname} -> {ip}")
 
