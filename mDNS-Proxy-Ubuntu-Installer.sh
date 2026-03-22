@@ -2,7 +2,7 @@
 
 # mDNS-Proxy-Ubuntu-Installer.sh
 # mDNS Proxyの自動インストールスクリプト (Ubuntu 24.04向け)
-# curl https://raw.githubusercontent.com/hiro-gj/mdns_proxy/main/mDNS-Proxy-Installer.sh > mDNS-Proxy-Installer.sh
+# curl https://raw.githubusercontent.com/hiro-gj/mdns_proxy/main/mDNS-Proxy-Ubuntu-Installer.sh > mDNS-Proxy-Ubuntu-Installer.sh
 
 set -e
 
@@ -58,9 +58,11 @@ sudo systemctl daemon-reload
 
 echo "=== インストール完了 ==="
 echo "インストール先: $INSTALL_DIR"
+echo "手動起動(対話メニュー): sudo python3 $INSTALL_DIR/src/main.py"
 echo "サービスファイル: $SERVICE_FILE"
 echo ""
 echo "※ サービスの起動は手動で行ってください。"
 echo "自動起動の有効化と起動コマンド："
 echo "sudo systemctl enable mdns_proxy.service"
 echo "sudo systemctl start mdns_proxy.service"
+
