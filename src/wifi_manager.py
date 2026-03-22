@@ -1,6 +1,6 @@
 import time
 
-from .logger_config import logger
+from logger_config import logger
 
 def connect(ssid, password):
     """

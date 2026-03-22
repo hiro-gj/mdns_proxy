@@ -14,13 +14,13 @@ if get_platform() != 'pico':
     for dir_name in ['log', 'db']:
         os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), dir_name), exist_ok=True)
 
-from . import config
-from . import database
-from . import scheduler
-from . import mdns_server
-from . import api_server
-from . import cli
-from .logger_config import logger
+import config
+import database
+import scheduler
+import mdns_server
+import api_server
+import cli
+from logger_config import logger
 
 def main():
     logger.info("mDNS Proxy Starting...")
@@ -31,7 +31,7 @@ def main():
 
     # Picoの場合はWi-Fi接続
     if get_platform() == 'pico':
-        from . import wifi_manager
+        import wifi_manager
         wifi_manager.connect(sys_config.get('network', 'wifi_ssid'), sys_config.get('network', 'wifi_password'))
 
     # 2. データベース初期化

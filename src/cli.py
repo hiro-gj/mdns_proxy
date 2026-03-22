@@ -44,7 +44,7 @@ def _instant_execution_mode(db, sys_config):
             # Usually instant execution means running the main proxy loop or a specific task repeatedly.
             # Assuming it just waits or triggers some instant syncs. We will just sleep and print status.
             print("実行中... (終了するには Ctrl+C)")
-            time.sleep(sys_config.get('system', 'interval', fallback=30))
+            time.sleep(int(sys_config.get('system', 'interval', fallback=30)))
     except KeyboardInterrupt:
         print("\nインスタント実行モードを終了しました。")
 
