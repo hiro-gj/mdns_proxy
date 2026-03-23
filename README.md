@@ -41,6 +41,7 @@ wifi_password = your_wifi_password
 ### search_hosts.ini
 検索対象とするローカルホスト名、またはローカルFQDNのリストを定義します。
 `.local` の記述を省略した場合でも、自動的に `.local` が補完されて対象になります。
+ホスト名の後に `= IPアドレス` を指定することで、mDNSの検索を行わずに指定した固定IPアドレスを応答させることも可能です。
 
 ```ini
 [hosts]
@@ -51,6 +52,9 @@ wifi_password = your_wifi_password
 # printer1.local
 test-device1
 test-device2.local
+
+# IPアドレスを固定で指定する場合
+test-device3 = 192.168.3.10
 ```
 
 ## CLIツールによる管理 (cli.py)
