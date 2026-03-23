@@ -69,9 +69,11 @@ import urllib.request
 import json
 
 def _sync_to_others(db, sys_config):
-    # self_records の内容を HTTP(POST) で other_proxies に送信する
+    # self_records と static_hosts の内容を HTTP(POST) で other_proxies に送信する
     with db.get_connection() as conn:
         cursor = conn.cursor()
+        
+        # 1. self_records の取得
         cursor.execute('SELECT hostname, ip_address, record_type, ttl FROM self_records')
         records = []
         for row in cursor.fetchall():
@@ -81,31 +83,54 @@ def _sync_to_others(db, sys_config):
                 "record_type": row[2],
                 "ttl": row[3]
             })
-        
-        if not records:
-            return
             
+        # 2. static_hosts の取得
+        cursor.execute('SELECT hostname FROM static_hosts')
+        static_hosts = []
+        for row in cursor.fetchall():
+            static_hosts.append({"hostname": row[0]})
+        
         cursor.execute('SELECT ip_address FROM other_proxies')
         proxies = cursor.fetchall()
+        
+    if not proxies:
+        return
         
     token_prefix = sys_config.get('system', 'token_prefix', fallback='mDNSProxy_')
     import socket
     token = f"{token_prefix}{socket.gethostname()}"
     
-    data = json.dumps({"records": records}).encode('utf-8')
-    
-    for (proxy_ip,) in proxies:
-        url = f"http://{proxy_ip}/api/other-records"
-        req = urllib.request.Request(url, data=data, method='POST')
-        req.add_header('Content-Type', 'application/json')
-        req.add_header('Authorization', f'Token {token}')
-        req.add_header('Content-Length', str(len(data)))
-        
-        try:
-            with urllib.request.urlopen(req, timeout=5) as response:
-                pass
-        except Exception as e:
-            logger.error(f"[_sync_to_others] Failed to sync with {proxy_ip}: {e}")
+    # other-records 送信
+    if records:
+        data_records = json.dumps({"records": records}).encode('utf-8')
+        for (proxy_ip,) in proxies:
+            url = f"http://{proxy_ip}/api/other-records"
+            req = urllib.request.Request(url, data=data_records, method='POST')
+            req.add_header('Content-Type', 'application/json')
+            req.add_header('Authorization', f'Token {token}')
+            req.add_header('Content-Length', str(len(data_records)))
+            
+            try:
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    pass
+            except Exception as e:
+                logger.error(f"[_sync_to_others] Failed to sync records with {proxy_ip}: {e}")
+
+    # static-hosts 送信
+    if static_hosts:
+        data_hosts = json.dumps({"hosts": static_hosts}).encode('utf-8')
+        for (proxy_ip,) in proxies:
+            url = f"http://{proxy_ip}/api/static-hosts"
+            req = urllib.request.Request(url, data=data_hosts, method='POST')
+            req.add_header('Content-Type', 'application/json')
+            req.add_header('Authorization', f'Token {token}')
+            req.add_header('Content-Length', str(len(data_hosts)))
+            
+            try:
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    pass
+            except Exception as e:
+                logger.error(f"[_sync_to_others] Failed to sync static_hosts with {proxy_ip}: {e}")
 
 def _merge_records(db):
     with db.get_connection() as conn:

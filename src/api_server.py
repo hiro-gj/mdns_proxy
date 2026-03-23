@@ -69,6 +69,54 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
 
             except Exception as e:
                 self.send_error(400, f"Bad Request: {str(e)}")
+
+        elif self.path == '/api/static-hosts':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            auth_header = self.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Token '):
+                self.send_error(401, "Unauthorized")
+                return
+            
+            token = auth_header.split(' ')[1]
+            try:
+                data = json.loads(post_data)
+                
+                with self.server.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    
+                    # 外部プロキシIDの取得/登録（必要に応じて）
+                    cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
+                    row = cursor.fetchone()
+                    if not row:
+                        cursor.execute(
+                            'INSERT INTO other_proxies (ip_address, token, discovery_method) VALUES (?, ?, ?)',
+                            (self.client_address[0], token, 'token')
+                        )
+
+                    # 既存の static_hosts を取得
+                    cursor.execute('SELECT hostname FROM static_hosts')
+                    existing_hosts = set(r[0] for r in cursor.fetchall())
+                    
+                    for host_data in data.get('hosts', []):
+                        hostname = host_data.get('hostname')
+                        if hostname and hostname not in existing_hosts:
+                            cursor.execute(
+                                'INSERT INTO static_hosts (hostname) VALUES (?)',
+                                (hostname,)
+                            )
+                            existing_hosts.add(hostname)
+                    conn.commit()
+
+                self.send_response(201)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success"}).encode())
+
+            except Exception as e:
+                self.send_error(400, f"Bad Request: {str(e)}")
+
         else:
             self.send_error(404, "Not Found")
 
