@@ -50,9 +50,15 @@ def main():
     # 4. スケジューラの開始（ループ）
     scheduler.start(db, sys_config)
 
-    # 5. CLI（対話モード）※非デーモン時
+    # 5. メインループの維持（バックグラウンド動作をサポート）
     try:
-        cli.run(db, sys_config)
+        if sys.stdin and sys.stdin.isatty():
+            # ターミナルから実行された場合のみCLIを起動
+            cli.run(db, sys_config)
+        else:
+            # サービスとして実行された場合はデーモンループ
+            while True:
+                time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
 
