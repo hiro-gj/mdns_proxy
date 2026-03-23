@@ -67,9 +67,11 @@ def _handle_query(db, sock, data, addr):
     else:
         with db.get_connection() as conn:
             cursor = conn.cursor()
+            base_name = queried_hostname[:-6] if queried_hostname.endswith('.local') else queried_hostname
+            local_name = base_name + '.local'
             cursor.execute(
-                'SELECT ip_address, ttl FROM merged_records WHERE hostname = ?',
-                (queried_hostname,)
+                'SELECT ip_address, ttl FROM merged_records WHERE hostname = ? OR hostname = ? OR hostname = ?',
+                (queried_hostname, base_name, local_name)
             )
             row = cursor.fetchone()
         

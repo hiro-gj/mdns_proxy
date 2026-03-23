@@ -20,10 +20,17 @@ class Database:
                 CREATE TABLE IF NOT EXISTS static_hosts (
                     host_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     hostname TEXT NOT NULL UNIQUE,
+                    ip_address TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # マイグレーション: ip_address カラムがない場合は追加
+            cursor.execute("PRAGMA table_info(static_hosts)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'ip_address' not in columns:
+                cursor.execute('ALTER TABLE static_hosts ADD COLUMN ip_address TEXT')
             # self_records
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS self_records (
@@ -86,22 +93,29 @@ class Database:
             cursor = conn.cursor()
             
             # DB上の既存ホストを取得
-            cursor.execute('SELECT hostname FROM static_hosts')
-            existing_hosts = set(row[0] for row in cursor.fetchall())
+            cursor.execute('SELECT hostname, ip_address FROM static_hosts')
+            existing_hosts = {row[0]: row[1] for row in cursor.fetchall()}
             
             # INIファイルのホストを取得
-            ini_hosts = set(hosts_config.options('hosts'))
+            ini_hosts = {}
+            for k, v in hosts_config.items('hosts'):
+                ini_hosts[k] = v
             
-            # INIにあってDBにないものを追加
-            for host in ini_hosts:
+            # INIにあってDBにないものを追加、またはIPが変更されたものを更新
+            for host, ip in ini_hosts.items():
                 if host not in existing_hosts:
                     cursor.execute(
-                        'INSERT INTO static_hosts (hostname) VALUES (?)',
-                        (host,)
+                        'INSERT INTO static_hosts (hostname, ip_address) VALUES (?, ?)',
+                        (host, ip)
+                    )
+                elif existing_hosts[host] != ip:
+                    cursor.execute(
+                        'UPDATE static_hosts SET ip_address = ? WHERE hostname = ?',
+                        (ip, host)
                     )
             
             # DBにあってINIにないものを削除
-            for host in existing_hosts:
+            for host in list(existing_hosts.keys()):
                 if host not in ini_hosts:
                     cursor.execute(
                         'DELETE FROM static_hosts WHERE hostname = ?',

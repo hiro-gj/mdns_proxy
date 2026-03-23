@@ -6,11 +6,16 @@ def resolve_all(db, sys_config):
     """static_hosts に登録されているホストを全て名前解決し、self_records に登録する"""
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT host_id, hostname FROM static_hosts')
+        cursor.execute('SELECT host_id, hostname, ip_address FROM static_hosts')
         hosts = cursor.fetchall()
 
-        for host_id, hostname in hosts:
-            ip, method = _resolve_host(hostname)
+        for host_id, hostname, static_ip in hosts:
+            if static_ip:
+                ip = static_ip
+                method = 'static'
+            else:
+                ip, method = _resolve_host(hostname)
+                
             if ip:
                 ttl = int(sys_config.get('system', 'ttl', fallback='120'))
                 # 既存レコードがあれば更新、なければ追加
