@@ -69,6 +69,16 @@ def setup_logger():
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
         
+        logger._console_handler = console_handler
+        
     return logger
 
 logger = setup_logger()
+
+def disable_console_logging():
+    if hasattr(logger, '_console_handler') and logger._console_handler in logger.handlers:
+        logger.removeHandler(logger._console_handler)
+
+def enable_console_logging():
+    if hasattr(logger, '_console_handler') and logger._console_handler not in logger.handlers:
+        logger.addHandler(logger._console_handler)
