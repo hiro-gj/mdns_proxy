@@ -39,26 +39,39 @@ def _listen(db):
     while True:
         try:
             data, addr = sock.recvfrom(4096)
-            # 簡易的に、クエリ受信時に常にDBを検索し、一致があれば応答を返す
-            # 実際にはDNSパケットのパースと、それに合わせた応答パケットの構築が必要。
             _handle_query(db, sock, data, addr)
         except Exception as e:
             logger.error(f"[mDNS Server] Error: {e}")
 
 def _handle_query(db, sock, data, addr):
-    # DNSパケットのパース処理（簡易実装としてダミー）
-    # クエリされたホスト名を取得
+    from logger_config import logger
     queried_hostname = _extract_hostname(data)
     if not queried_hostname:
         return
         
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT ip_address, ttl FROM merged_records WHERE hostname = ?',
-            (queried_hostname,)
-        )
-        row = cursor.fetchone()
+    logger.info(f"[mDNS Server] Received query for: {queried_hostname} from {addr}")
+
+    # 自身のホスト名のクエリかチェック
+    my_hostname = socket.gethostname()
+    if queried_hostname.lower() == my_hostname.lower() or queried_hostname.lower() == my_hostname.lower() + '.local':
+        # 自身のIPアドレスを取得
+        try:
+            # 簡易的にUDPソケットを使って外部に接続するふりをして自身のIPを取得する
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(('8.8.8.8', 80))
+                ip = s.getsockname()[0]
+            ttl = 120
+            row = (ip, ttl)
+        except Exception as e:
+            row = None
+    else:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT ip_address, ttl FROM merged_records WHERE hostname = ?',
+                (queried_hostname,)
+            )
+            row = cursor.fetchone()
         
     if row:
         ip, ttl = row
@@ -67,14 +80,75 @@ def _handle_query(db, sock, data, addr):
         if response:
             from logger_config import logger
             sock.sendto(response, (MDNS_ADDR, MDNS_PORT))
-            logger.debug(f"[mDNS Server] Replied to {addr} for {queried_hostname} -> {ip}")
+            logger.info(f"[mDNS Server] Replied to {addr} for {queried_hostname} -> {ip}")
 
 def _extract_hostname(data):
-    # 実際のパースロジックは煩雑なため省略
-    # 簡易的に、パケット内に含まれるホスト名らしい文字列を抽出
-    # (ここではダミーとして None を返す)
+    try:
+        if len(data) < 12:
+            return None
+        # ヘッダー (12 bytes)
+        # 質問数を取得
+        qdcount = (data[4] << 8) | data[5]
+        if qdcount == 0:
+            return None
+            
+        offset = 12
+        parts = []
+        while True:
+            if offset >= len(data):
+                return None
+            length = data[offset]
+            if length == 0:
+                offset += 1
+                break
+            if (length & 0xC0) == 0xC0:
+                # ポインタ（ここでは簡易的に無視、通常クエリでは先頭に来るため）
+                offset += 2
+                break
+            offset += 1
+            parts.append(data[offset:offset+length].decode('utf-8'))
+            offset += length
+            
+        if parts:
+            return ".".join(parts)
+    except Exception as e:
+        pass
     return None
 
 def _build_response(query_data, hostname, ip, ttl):
-    # mDNS応答パケットの構築 (ダミー実装)
-    return None
+    try:
+        # トランザクションIDをコピー
+        tx_id = query_data[0:2]
+        
+        # Flags: 0x8400 (Authoritative Response)
+        flags = b'\x84\x00'
+        
+        # QDCOUNT=0, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
+        counts = b'\x00\x00\x00\x01\x00\x00\x00\x00'
+        
+        header = tx_id + flags + counts
+        
+        # 応答名の構築
+        name_parts = hostname.split('.')
+        qname = b''
+        for part in name_parts:
+            qname += bytes([len(part)]) + part.encode('utf-8')
+        qname += b'\x00'
+        
+        # Type A (1), Class IN (1) + Cache Flush (0x8000)
+        type_class = b'\x00\x01\x80\x01'
+        
+        # TTL
+        ttl_bytes = ttl.to_bytes(4, 'big')
+        
+        # RDLENGTH (4 bytes for IPv4)
+        rdlength = b'\x00\x04'
+        
+        # RDATA (IP Address)
+        ip_parts = ip.split('.')
+        rdata = bytes([int(p) for p in ip_parts])
+        
+        response = header + qname + type_class + ttl_bytes + rdlength + rdata
+        return response
+    except Exception as e:
+        return None
