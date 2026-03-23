@@ -65,9 +65,47 @@ def _discover_proxies(db, sys_config):
                 )
         conn.commit()
 
+import urllib.request
+import json
+
 def _sync_to_others(db, sys_config):
-    # TODO: self_records の内容を HTTP(POST) で other_proxies に送信する
-    pass
+    # self_records の内容を HTTP(POST) で other_proxies に送信する
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT hostname, ip_address, record_type, ttl FROM self_records')
+        records = []
+        for row in cursor.fetchall():
+            records.append({
+                "hostname": row[0],
+                "ip_address": row[1],
+                "record_type": row[2],
+                "ttl": row[3]
+            })
+        
+        if not records:
+            return
+            
+        cursor.execute('SELECT ip_address FROM other_proxies')
+        proxies = cursor.fetchall()
+        
+    token_prefix = sys_config.get('system', 'token_prefix', fallback='mDNSProxy_')
+    import socket
+    token = f"{token_prefix}{socket.gethostname()}"
+    
+    data = json.dumps({"records": records}).encode('utf-8')
+    
+    for (proxy_ip,) in proxies:
+        url = f"http://{proxy_ip}/api/other-records"
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Authorization', f'Token {token}')
+        req.add_header('Content-Length', str(len(data)))
+        
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                pass
+        except Exception as e:
+            logger.error(f"[_sync_to_others] Failed to sync with {proxy_ip}: {e}")
 
 def _merge_records(db):
     with db.get_connection() as conn:
