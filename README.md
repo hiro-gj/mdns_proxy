@@ -21,7 +21,7 @@ mDNS Proxyは、ネットワークセグメントを跨いだmDNS名前解決を
 ```ini
 [system]
 # 実行間隔（秒）
-interval = 30
+interval = 10
 # 発信トークン接頭語
 token_prefix = mDNSProxy_
 # HTTP待ち受けポート
