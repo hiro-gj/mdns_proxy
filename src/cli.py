@@ -1,7 +1,9 @@
 import sys
 import time
+from logger_config import disable_console_logging, enable_console_logging
 
 def run(db, sys_config):
+    disable_console_logging()
     while True:
         print("\n--- mDNS Proxy CLI ---")
         print("1. マージ済みレコードの表示")
@@ -36,6 +38,7 @@ def run(db, sys_config):
             break
 
 def _instant_execution_mode(db, sys_config):
+    enable_console_logging()
     print("\n--- インスタント実行モード ---")
     print("Ctrl+C を押すと終了します。")
     try:
@@ -47,6 +50,8 @@ def _instant_execution_mode(db, sys_config):
             time.sleep(int(sys_config.get('system', 'interval', fallback=30)))
     except KeyboardInterrupt:
         print("\nインスタント実行モードを終了しました。")
+    finally:
+        disable_console_logging()
 
 def _show_merged_records(db):
     print("\n--- マージ済みレコード ---")

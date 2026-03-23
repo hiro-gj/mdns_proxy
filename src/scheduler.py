@@ -114,17 +114,27 @@ def _merge_records(db):
         cursor.execute('DELETE FROM merged_records')
         
         # self_records をコピー
+        # 重複を排除するためGROUP BYを使用
         cursor.execute('''
             INSERT INTO merged_records (hostname, ip_address, record_type, ttl, source_type, source_record_id)
-            SELECT hostname, ip_address, record_type, ttl, 'self', record_id
+            SELECT hostname, ip_address, record_type, MAX(ttl), 'self', MIN(record_id)
             FROM self_records
+            GROUP BY hostname, ip_address, record_type
         ''')
         
         # other_records をコピー
+        # 既に self_records として登録されているものと、other_records内の重複を排除
         cursor.execute('''
             INSERT INTO merged_records (hostname, ip_address, record_type, ttl, source_type, source_record_id)
-            SELECT hostname, ip_address, record_type, ttl, 'other', record_id
+            SELECT hostname, ip_address, record_type, MAX(ttl), 'other', MIN(record_id)
             FROM other_records
+            WHERE NOT EXISTS (
+                SELECT 1 FROM merged_records m 
+                WHERE m.hostname = other_records.hostname 
+                  AND m.ip_address = other_records.ip_address 
+                  AND m.record_type = other_records.record_type
+            )
+            GROUP BY hostname, ip_address, record_type
         ''')
         
         conn.commit()
