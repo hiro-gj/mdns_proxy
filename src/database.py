@@ -15,8 +15,10 @@ class Database:
     def init_db(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # WALモードを有効にする
-            cursor.execute("PRAGMA journal_mode=WAL;")
+            # WALモードを有効化し、実際に有効化されたか確認する
+            mode = cursor.execute("PRAGMA journal_mode=WAL;").fetchone()[0].lower()
+            if mode != "wal":
+                raise RuntimeError(f"Failed to enable WAL mode (actual: {mode})")
             # 同期モードをNORMALにして書き込み速度と耐ロック性を高める
             cursor.execute("PRAGMA synchronous=NORMAL;")
             
