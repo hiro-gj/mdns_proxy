@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from contextlib import contextmanager
 
 class Database:
     def __init__(self):
@@ -11,9 +12,21 @@ class Database:
     
     def get_connection(self):
         return sqlite3.connect(self.db_path, timeout=30.0)
+
+    @contextmanager
+    def connection(self):
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     
     def init_db(self):
-        with self.get_connection() as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
             # WALモードを有効化し、実際に有効化されたか確認する
             mode = cursor.execute("PRAGMA journal_mode=WAL;").fetchone()[0].lower()
@@ -55,13 +68,25 @@ class Database:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS other_proxies (
                     proxy_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ip_address TEXT NOT NULL UNIQUE,
+                    node_id TEXT UNIQUE,
+                    ip_address TEXT NOT NULL,
+                    port INTEGER DEFAULT 80,
                     token TEXT NOT NULL,
                     discovery_method TEXT NOT NULL,
                     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN DEFAULT 1
                 )
             ''')
+            
+            # マイグレーション: node_id, port カラムがない場合は追加
+            cursor.execute("PRAGMA table_info(other_proxies)")
+            op_columns = [col[1] for col in cursor.fetchall()]
+            if 'node_id' not in op_columns:
+                cursor.execute('ALTER TABLE other_proxies ADD COLUMN node_id TEXT')
+                cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_other_proxies_node_id ON other_proxies(node_id)')
+            if 'port' not in op_columns:
+                cursor.execute('ALTER TABLE other_proxies ADD COLUMN port INTEGER DEFAULT 80')
+
             # other_records
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS other_records (
@@ -96,7 +121,7 @@ class Database:
         if not hosts_config.has_section('hosts'):
             return
             
-        with self.get_connection() as conn:
+        with self.connection() as conn:
             cursor = conn.cursor()
             
             # DB上の既存ホストを取得
