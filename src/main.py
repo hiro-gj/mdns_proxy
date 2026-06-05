@@ -42,7 +42,7 @@ def main():
     # 3. 各サーバーやプロセスの起動
     # APIサーバー(HTTP)をバックグラウンドまたはスレッド等で起動
     port = int(sys_config.get('system', 'port', fallback='80'))
-    api_server.start_server(db, port=port)
+    api_server.start_server(db, sys_config, port=port)
     
     # mDNSサーバーのリスナー起動
     mdns_server.start_listener(db)

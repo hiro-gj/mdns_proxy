@@ -10,7 +10,7 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            with self.server.db.get_connection() as conn:
+            with self.server.db.connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('SELECT hostname, ip_address, record_type, ttl FROM merged_records')
                 records = [
@@ -22,7 +22,19 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "File Not Found")
 
+    def _get_node_id_from_token(self, token):
+        # Token format: mDNSProxy_<hostname>_<node_id>
+        parts = token.split('_')
+        if len(parts) >= 3:
+            return parts[-1]
+        return None
+
     def do_POST(self):
+        import scheduler
+        
+        # 自ノードIDの取得
+        my_node_id = scheduler._get_node_id(self.server.sys_config)
+
         if self.path == '/api/other-records':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
@@ -34,24 +46,96 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                 return
             
             token = auth_header.split(' ')[1]
+            
+            # 送信元のノードIDとポートを取得
+            sender_node_id = self.headers.get('X-Sender-Node-ID')
+            if not sender_node_id:
+                sender_node_id = self._get_node_id_from_token(token)
+                
+            sender_port_str = self.headers.get('X-Sender-Port')
+            try:
+                sender_port = int(sender_port_str) if sender_port_str else 53080
+            except ValueError:
+                sender_port = 53080
+
+            # 自ノード判定：自ノードからのPOSTは無視して成功レスポンス
+            if sender_node_id and sender_node_id == my_node_id:
+                self.send_response(201)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success", "message": "Ignored self loopback"}).encode())
+                return
+
             try:
                 data = json.loads(post_data)
                 import dns_resolver
                 
                 # DB更新
-                with self.server.db.get_connection() as conn:
+                with self.server.db.connection() as conn:
                     cursor = conn.cursor()
                     # 外部プロキシIDの取得/登録
-                    cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
-                    row = cursor.fetchone()
-                    if row:
-                        proxy_id = row[0]
-                    else:
+                    proxy_id = None
+                    
+                    # 旧DBの UNIQUE(ip_address) 対策：
+                    # すでに同一 ip_address もしくは同一 ip_address:port が ip_address 列に入っているか、
+                    # または同一 IPアドレスのレコードが存在するか確認し、あればそちらを再利用する
+                    cursor.execute(
+                        '''
+                        SELECT proxy_id FROM other_proxies 
+                        WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
+                        ''', 
+                        (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
+                    )
+                    ip_row = cursor.fetchone()
+                    if ip_row:
+                        proxy_id = ip_row[0]
                         cursor.execute(
-                            'INSERT INTO other_proxies (ip_address, token, discovery_method) VALUES (?, ?, ?)',
-                            (self.client_address[0], token, 'token')
+                            '''
+                            UPDATE other_proxies 
+                            SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                            WHERE proxy_id = ?
+                            ''',
+                            (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
                         )
-                        proxy_id = cursor.lastrowid
+
+                    if not proxy_id and sender_node_id:
+                        cursor.execute('SELECT proxy_id FROM other_proxies WHERE node_id = ?', (sender_node_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            proxy_id = row[0]
+                            # IP、ポート、トークン、last_seenをアップデート
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (self.client_address[0], sender_port, token, proxy_id)
+                            )
+                    
+                    if not proxy_id:
+                        # token で既存確認
+                        cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
+                        row = cursor.fetchone()
+                        if row:
+                            proxy_id = row[0]
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET node_id = ?, ip_address = ?, port = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, proxy_id)
+                            )
+                        else:
+                            cursor.execute(
+                                '''
+                                INSERT INTO other_proxies (node_id, ip_address, port, token, discovery_method) 
+                                VALUES (?, ?, ?, ?, ?)
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, token, 'token')
+                            )
+                            proxy_id = cursor.lastrowid
                     
                     # 既存の other_records は、該当するプロキシから送られてきた最新のレコードで完全に上書き（置き換え）
                     cursor.execute('DELETE FROM other_records WHERE source_proxy_id = ?', (proxy_id,))
@@ -67,7 +151,9 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                             ''',
                             (proxy_id, record['hostname'], record['ip_address'], record.get('record_type', 'A'), record.get('ttl', 120))
                         )
-                    conn.commit()
+                    
+                # 受信直後にマージ更新を実行
+                scheduler._merge_records(self.server.db)
 
                 self.send_response(201)
                 self.send_header('Content-type', 'application/json')
@@ -87,20 +173,88 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                 return
             
             token = auth_header.split(' ')[1]
+            
+            sender_node_id = self.headers.get('X-Sender-Node-ID')
+            if not sender_node_id:
+                sender_node_id = self._get_node_id_from_token(token)
+
+            sender_port_str = self.headers.get('X-Sender-Port')
+            try:
+                sender_port = int(sender_port_str) if sender_port_str else 53080
+            except ValueError:
+                sender_port = 53080
+
+            if sender_node_id and sender_node_id == my_node_id:
+                self.send_response(201)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success", "message": "Ignored self loopback"}).encode())
+                return
+
             try:
                 data = json.loads(post_data)
                 
-                with self.server.db.get_connection() as conn:
+                with self.server.db.connection() as conn:
                     cursor = conn.cursor()
                     
                     # 外部プロキシIDの取得/登録（必要に応じて）
-                    cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
-                    row = cursor.fetchone()
-                    if not row:
+                    proxy_id = None
+                    
+                    # 旧DB UNIQUE 対策
+                    cursor.execute(
+                        '''
+                        SELECT proxy_id FROM other_proxies 
+                        WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
+                        ''', 
+                        (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
+                    )
+                    ip_row = cursor.fetchone()
+                    if ip_row:
+                        proxy_id = ip_row[0]
                         cursor.execute(
-                            'INSERT INTO other_proxies (ip_address, token, discovery_method) VALUES (?, ?, ?)',
-                            (self.client_address[0], token, 'token')
+                            '''
+                            UPDATE other_proxies 
+                            SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                            WHERE proxy_id = ?
+                            ''',
+                            (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
                         )
+
+                    if not proxy_id and sender_node_id:
+                        cursor.execute('SELECT proxy_id FROM other_proxies WHERE node_id = ?', (sender_node_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            proxy_id = row[0]
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (self.client_address[0], sender_port, token, proxy_id)
+                            )
+                    
+                    if not proxy_id:
+                        cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
+                        row = cursor.fetchone()
+                        if row:
+                            proxy_id = row[0]
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET node_id = ?, ip_address = ?, port = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, proxy_id)
+                            )
+                        else:
+                            cursor.execute(
+                                '''
+                                INSERT INTO other_proxies (node_id, ip_address, port, token, discovery_method) 
+                                VALUES (?, ?, ?, ?, ?)
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, token, 'token')
+                            )
 
                     # 既存の static_hosts を取得
                     cursor.execute('SELECT hostname FROM static_hosts')
@@ -114,7 +268,6 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                                 (hostname,)
                             )
                             existing_hosts.add(hostname)
-                    conn.commit()
 
                 self.send_response(201)
                 self.send_header('Content-type', 'application/json')
@@ -129,10 +282,11 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
 
 from logger_config import logger
 
-def start_server(db, port=80):
+def start_server(db, sys_config, port=80):
     try:
         server = HTTPServer(('', port), mDNSProxyAPIHandler)
         server.db = db
+        server.sys_config = sys_config
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         logger.info(f"[API Server] Listening on port {port}...")

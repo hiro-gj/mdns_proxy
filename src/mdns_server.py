@@ -94,7 +94,7 @@ def _handle_query(db, sock, data, addr):
         except Exception as e:
             row = None
     else:
-        with db.get_connection() as conn:
+        with db.connection() as conn:
             cursor = conn.cursor()
             base_name = queried_hostname[:-6] if queried_hostname.endswith('.local') else queried_hostname
             local_name = base_name + '.local'
