@@ -28,10 +28,11 @@ jobs:
       - name: Create Release Archive
         run: |
           # .gitフォルダは保持したまま、アーカイブ対象から除外
-          zip -r mdns_proxy.zip . -x ".git/*"
+          zip -r mdns_proxy-${{ github.event.release.tag_name }}.zip . -x ".git/*"
 
       - name: Upload Release Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} mdns_proxy.zip --clobber
+          gh release upload ${{ github.event.release.tag_name }} mdns_proxy-${{ github.event.release.tag_name }}.zip --clobber
+          
