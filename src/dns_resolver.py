@@ -11,7 +11,7 @@ def is_loopback(ip_str: str) -> bool:
 
 def resolve_all(db, sys_config):
     """static_hosts に登録されているホストを全て名前解決し、self_records に登録する"""
-    with db.get_connection() as conn:
+    with db.connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT host_id, hostname, ip_address FROM static_hosts')
         hosts = cursor.fetchall()
