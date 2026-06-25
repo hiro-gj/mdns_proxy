@@ -17,38 +17,69 @@ echo "[1/4] パッケージの更新と必要なツールのインストール..
 sudo apt -y update
 sudo apt -y install python3 python3-pip unzip curl jq
 
-echo "[2/4] ソースコードのダウンロードと展開..."
+echo "[2/4] ソースコードの取得と展開..."
 TMP_DIR=$(mktemp -d)
-cd "$TMP_DIR"
+ORIGINAL_PWD=$(pwd)
 
-# 最新リリース情報を取得
-RELEASE_JSON=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest")
-
-# 最新リリースのZIPアセットのURLを動的に取得
-ZIP_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[]? | select(.name | endswith(".zip")) | .browser_download_url')
-
-# もしリリースのZIPアセットのURLが直接取得できなかった場合、最新タグ名からActionsビルドのZIP URLを構築
-if [ -z "$ZIP_URL" ] || [ "$ZIP_URL" = "null" ]; then
-  TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-  if [ -n "$TAG_NAME" ] && [ "$TAG_NAME" != "null" ]; then
-    echo "GitHub Releaseのアセットから直接ZIP URLを取得できなかったため、タグ [${TAG_NAME}] のビルドZIP URLを構築してダウンロードします..."
-    ZIP_URL="https://github.com/${REPO}/releases/download/${TAG_NAME}/mdns_proxy-${TAG_NAME}.zip"
-  else
-    echo "最新リリースのタグ情報を取得できなかったため、mainブランチのZIPにフォールバックします..."
-    ZIP_URL="https://github.com/${REPO}/archive/refs/heads/main.zip"
+# ローカルにzipファイルが存在するか確認
+LOCAL_ZIP=""
+for f in "$ORIGINAL_PWD"/mdns_proxy-*.zip "$ORIGINAL_PWD"/mdns-proxy-*.zip; do
+  if [ -f "$f" ]; then
+    LOCAL_ZIP="$f"
+    break
   fi
+done
+
+if [ -n "$LOCAL_ZIP" ]; then
+  echo "[+] サーバ上の既存ZIPファイルを見つけました: $(basename "$LOCAL_ZIP")"
+  echo "[+] このZIPファイルを使用してインストールします。"
+  cp "$LOCAL_ZIP" "$TMP_DIR/mdns_proxy.zip"
+else
+  echo "[+] インターネットから最新リリースをダウンロードします..."
+  # 最新リリース情報を取得
+  RELEASE_JSON=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest")
+
+  # 最新リリースのZIPアセットのURLを動的に取得
+  ZIP_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[]? | select(.name | endswith(".zip")) | .browser_download_url')
+
+  # もしリリースのZIPアセットのURLが直接取得できなかった場合、最新タグ名からActionsビルドのZIP URLを構築
+  if [ -z "$ZIP_URL" ] || [ "$ZIP_URL" = "null" ]; then
+    TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+    if [ -n "$TAG_NAME" ] && [ "$TAG_NAME" != "null" ]; then
+      echo "GitHub Releaseのアセットから直接ZIP URLを取得できなかったため、タグ [${TAG_NAME}] のビルドZIP URLを構築してダウンロードします..."
+      ZIP_URL="https://github.com/${REPO}/releases/download/${TAG_NAME}/mdns_proxy-${TAG_NAME}.zip"
+    else
+      echo "最新リリースのタグ情報を取得できなかったため、mainブランチのZIPにフォールバックします..."
+      ZIP_URL="https://github.com/${REPO}/archive/refs/heads/main.zip"
+    fi
+  fi
+
+  curl -L -o "$TMP_DIR/mdns_proxy.zip" "$ZIP_URL"
 fi
 
-curl -L -o mdns_proxy.zip "$ZIP_URL"
+cd "$TMP_DIR"
 unzip -q mdns_proxy.zip
 
-# 展開されたディレクトリ名を特定 (例: mdns_proxy-latest)
-EXTRACTED_DIR=$(ls -d */ | head -n 1)
-
-# インストール先の作成とファイルの配置
+# インストール先の作成
 sudo mkdir -p "$INSTALL_DIR"
-# 既存のファイルがある場合は上書き（あるいは削除してコピー）
-sudo cp -rn "${EXTRACTED_DIR}"* "$INSTALL_DIR/" || sudo cp -r "${EXTRACTED_DIR}"* "$INSTALL_DIR/"
+
+# 展開されたファイルの構造を自動判定してコピー
+if [ -d "src" ]; then
+  # zipの直下にsrcディレクトリがある場合（ディレクトリなしの直展開構成）
+  echo "[+] ZIPの直下にソースコードが格納されています。そのままコピーします。"
+  # 元の cp コマンドを踏襲して既存ファイルの上書き・コピー
+  sudo cp -r * "$INSTALL_DIR/"
+else
+  # zip内に親ディレクトリが存在する場合（例: mdns_proxy-develop/src など）
+  EXTRACTED_DIR=$(ls -d */ | grep -v "mdns_proxy.zip" | head -n 1)
+  if [ -n "$EXTRACTED_DIR" ] && [ -d "${EXTRACTED_DIR}src" ]; then
+    echo "[+] 親ディレクトリ [${EXTRACTED_DIR}] を検出しました。このディレクトリの中身をコピーします。"
+    sudo cp -r "${EXTRACTED_DIR}"* "$INSTALL_DIR/"
+  else
+    echo "[-] ソースコード(srcディレクトリ)が見つかりませんでした。展開に失敗した可能性があります。"
+    exit 1
+  fi
+fi
 
 # Linux環境では不要なPico用ポリフィルファイルを削除
 echo "[+] Linux環境向けにPico用ポリフィルファイルを削除します..."
