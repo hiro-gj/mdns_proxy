@@ -20,7 +20,7 @@ def load_system_config():
         config.add_section('network')
         config.set('network', 'external_proxies', '')
         config.set('network', 'wifi_ssid', '')
-        config.set('network', 'wifi_password', '')
+        config.set('network', 'wifi_password_encrypted', '')
     return config
 
 def load_hosts_config():
