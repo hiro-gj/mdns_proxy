@@ -21,7 +21,7 @@ def resolve_all(db, sys_config):
                 ip = static_ip
                 method = 'static'
             else:
-                ip, method = _resolve_host(hostname)
+                ip, method = _resolve_host(hostname, db)
                 
             if ip:
                 # ループバックアドレスの除外
@@ -44,12 +44,24 @@ def resolve_all(db, sys_config):
         
         conn.commit()
 
-def _resolve_host(hostname):
+def _resolve_host(hostname, db=None):
     """
     複数手法で名前解決を試みる。
     OSキャッシュや自分自身のmDNS Proxyが返した古いレコードを誤って再解決（自己参照ループ）するのを防ぐため、
     システムのDNSリゾルバー（socket.gethostbyname）は使用せず、生mDNSクエリおよびpingのみで実在を確認する。
     """
+    # 0. 同期されたDB（merged_records）を最優先で検索する
+    if db:
+        try:
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT ip_address FROM merged_records WHERE hostname = ?', (hostname,))
+                row = cursor.fetchone()
+                if row:
+                    return row[0], 'db_merged'
+        except Exception:
+            pass
+
     ip = None
     method = None
 
@@ -69,6 +81,10 @@ def _resolve_host(hostname):
             MDNS_PORT = 5353
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(2.0)
+            try:
+                sock.bind(('', 0))
+            except Exception:
+                pass
             
             # Build mDNS query packet
             tx_id = urandom.randint(0, 65535)

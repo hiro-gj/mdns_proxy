@@ -476,10 +476,20 @@ def _pull_from_others(db, sys_config):
         try:
             records = []
             if is_pico:
-                res = urequests.get(url, timeout=5)
-                if res.status_code == 200:
-                    records = res.json()
-                res.close()
+                import gc
+                gc.collect()
+                res = None
+                try:
+                    res = urequests.get(url, timeout=5)
+                    if res.status_code == 200:
+                        text_data = res.text
+                        import json
+                        records = json.loads(text_data)
+                        del text_data
+                        gc.collect()
+                finally:
+                    if res:
+                        res.close()
             else:
                 req = urllib.request.Request(url, method='GET')
                 with urllib.request.urlopen(req, timeout=5) as response:

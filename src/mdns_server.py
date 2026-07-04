@@ -26,6 +26,8 @@ def start_listener(db, sys_config=None):
     if sys.platform == 'rp2' or not HAS_THREADING:
         if threading_fallback:
             threading_fallback.start_new_thread(_listen, (db, sys_config))
+            # Pico環境向けに、LLMNR (ポート5355) スレッドも同時に起動させて Windows からの ping pc-0194 単体解決を両立させます
+            threading_fallback.start_new_thread(listen_llmnr, (db, sys_config))
             return True
         else:
             # スレッドが使えない場合はメインスレッドでブロッキング実行する
@@ -34,6 +36,9 @@ def start_listener(db, sys_config=None):
     else:
         t = threading.Thread(target=_listen, args=(db, sys_config), daemon=True)
         t.start()
+        # 非Pico環境でもLLMNRを並行起動
+        t2 = threading.Thread(target=listen_llmnr, args=(db, sys_config), daemon=True)
+        t2.start()
         return t
 
 def _setup_socket():
@@ -64,16 +69,42 @@ def _setup_socket():
                 sock.setsockopt(socket.SOL_SOCKET, SO_REUSEPORT, 1)
             except Exception:
                 pass
-        sock.bind(('', MDNS_PORT))
+            
+            # 自身のIPアドレスを取得
+            my_ip = ''
+            try:
+                import network
+                wlan = network.WLAN(network.STA_IF)
+                if wlan.isconnected():
+                    my_ip = wlan.ifconfig()[0]
+            except Exception:
+                pass
+
+            # OS(lwIP)内蔵mDNSとの衝突を回避するため、まず自身のIPアドレスに直接バインドを試みます。
+            # これによりワイルドカード(0.0.0.0:5353)でバインドしている内蔵mDNSとポート競合を起こさずに起動できます。
+            try:
+                if my_ip:
+                    sock.bind((my_ip, MDNS_PORT))
+                    logger.info(f"[mDNS Server] Bound to device IP: {my_ip}:{MDNS_PORT}")
+                else:
+                    sock.bind(('', MDNS_PORT))
+            except OSError:
+                try:
+                    sock.bind((MDNS_ADDR, MDNS_PORT))
+                except OSError:
+                    sock.bind(('', MDNS_PORT))
+        else:
+            sock.bind(('', MDNS_PORT))
     except OSError as e:
         import time
         from logger_config import logger
-        logger.warning(f"[mDNS Server] Port 5353 already in use. Retrying in 5 seconds... ({e})")
-        time.sleep(5)
+        logger.warning(f"[mDNS Server] Port 5353 already in use ({e}). Trying to bind on temporary port and rely on Multicast JOIN...")
+        # 5353のバインドに失敗した場合でも、ポートを共有・空きポートで代用してリスニングを維持するため、
+        # 例外を回避しつつ空きポートでのバインド、またはそのまま次の処理（マルチキャストグループ参加）を継続させます。
         try:
-            sock.bind(('', MDNS_PORT))
-        except OSError as e2:
-            logger.error(f"[mDNS Server] Could not bind to port 5353: {e2}. Listening skipped, relying on OS mDNS.")
+            sock.bind(('', 0)) # 空きポートでバインド（ポート5353へのJOINは下部で行います）
+        except Exception as e2:
+            logger.error(f"[mDNS Server] Temporary bind fail: {e2}")
             return None
     
     from logger_config import logger
@@ -95,34 +126,29 @@ def _setup_socket():
         return None
 
     # マルチキャスト送信設定: IP_MULTICAST_IF（送信IF明示）とTTL=255（②対応）
+    # ※ Wi-Fi接続前に起動された場合は、IPが確定していないため送信IFの設定は遅延（またはスキップ）します。
     try:
+        IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
+        IP_MULTICAST_TTL = getattr(socket, 'IP_MULTICAST_TTL', 10)
+        sock.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 255)
+        
         tmp_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tmp_s.connect(('8.8.8.8', 80))
             primary_ip = tmp_s.getsockname()[0]
-        except Exception:
-            primary_ip = "0.0.0.0"
-        finally:
-            tmp_s.close()
-        
-        # Pico(MicroPython)環境ではinet_aton or IP_MULTICAST_IFが無い場合があるためtry-exceptで囲む
-        try:
-            IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
             IP_MULTICAST_IF = getattr(socket, 'IP_MULTICAST_IF', 9)
-            IP_MULTICAST_TTL = getattr(socket, 'IP_MULTICAST_TTL', 10)
-            
             try:
                 ip_aton = socket.inet_aton(primary_ip)
             except Exception:
                 ip_aton = bytes([int(p) for p in primary_ip.split('.')])
-                
             sock.setsockopt(IPPROTO_IP, IP_MULTICAST_IF, ip_aton)
-            sock.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 255)
             logger.info(f"[mDNS Server] Multicast send interface set to: {primary_ip}")
         except Exception:
             pass
+        finally:
+            tmp_s.close()
     except Exception as e:
-        logger.warning(f"[mDNS Server] Failed to set multicast send interface: {e}")
+        pass
 
     logger.info("[mDNS Server] Listening on UDP 5353...")
     return sock
@@ -139,6 +165,104 @@ def _listen(db, sys_config=None):
             _handle_query(db, sock, data, addr, sys_config)
         except Exception as e:
             logger.error(f"[mDNS Server] Error: {e}")
+
+def setup_socket_llmnr():
+    from logger_config import logger
+    # LLMNRポートは5355、マルチキャストIPは224.0.0.252
+    LLMNR_PORT = 5355
+    LLMNR_ADDR = "224.0.0.252"
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('', LLMNR_PORT))
+        except Exception as e:
+            logger.error(f"[LLMNR Server] Could not bind to port 5355: {e}")
+            return None
+
+        # マルチキャストグループに参加
+        IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
+        IP_ADD_MEMBERSHIP = getattr(socket, 'IP_ADD_MEMBERSHIP', 1024)
+        try:
+            mreq = socket.inet_aton(LLMNR_ADDR) + socket.inet_aton('0.0.0.0')
+            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
+        except Exception:
+            ip_bin = bytes([224, 0, 0, 252]) + bytes([0, 0, 0, 0])
+            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, ip_bin)
+            
+        logger.info("[LLMNR Server] Listening on UDP 5355 (Windows single-label resolution support)...")
+        return sock
+    except Exception as e:
+        logger.error(f"[LLMNR Server] Init fail: {e}")
+        return None
+
+def handle_query_llmnr(db, sock, data, addr, sys_config=None):
+    from logger_config import logger
+    import struct
+    try:
+        if len(data) < 12:
+            return
+        
+        tx_id, flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHHH", data[:12])
+        # クエリのみを処理
+        if flags & 0x8000:
+            return
+            
+        queried_hostname = _extract_hostname(data)
+        if not queried_hostname:
+            return
+            
+        # 単一ホスト解決 (.local やドメイン指定があれば除去)
+        base_name = queried_hostname.split('.')[0]
+        
+        ip = None
+        ttl = 30
+        
+        if db is not None:
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT ip_address, ttl FROM merged_records WHERE hostname = ? OR hostname = ?',
+                    (base_name, f"{base_name}.local")
+                )
+                row = cursor.fetchone()
+                if row:
+                    ip, ttl = row
+        
+        if ip:
+            ip_parts = ip.split('.')
+            ip_bytes = bytes([int(p) for p in ip_parts])
+            
+            # LLMNR 応答ヘッダの構築
+            resp_flags = 0x8000 # Response + No Error
+            header = struct.pack("!HHHHHH", tx_id, resp_flags, 1, 1, 0, 0)
+            
+            # Question Sectionのコピー
+            # ヘッダ直後の名前長さから質問セクションの終わりを特定
+            name_len = data[12]
+            q_end = 12 + 1 + name_len + 1 + 4 # Name + Null + Type(2) + Class(2)
+            question = data[12:q_end]
+            
+            # Answer Section: Name (圧縮ポインタ 0xC00C), Type A(1), Class IN(1), TTL(4B), RDLENGTH(2B)=4, IP(4B)
+            answer = struct.pack("!HHHLH4s", 0xC00C, 1, 1, ttl, 4, ip_bytes)
+            
+            sock.sendto(header + question + answer, addr)
+            logger.info(f"[LLMNR Server] Replied {queried_hostname} -> {ip} to {addr}")
+    except Exception as e:
+        logger.error(f"[LLMNR Server] Error: {e}")
+
+def listen_llmnr(db, sys_config=None):
+    sock = setup_socket_llmnr()
+    if not sock:
+        return
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            handle_query_llmnr(db, sock, data, addr, sys_config)
+        except Exception as e:
+            from logger_config import logger
+            logger.error(f"[LLMNR Server] Runtime Error: {e}")
 
 def _get_my_ips():
     import sys

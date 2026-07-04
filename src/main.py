@@ -296,28 +296,47 @@ def main():
         # メインスレッド内で scheduler.tick() および mdns_server.tick() を呼ぶイベントループ方式にする。
 
         if get_platform() == 'pico':
-            # 4&5. メインスレッドでのループ処理（スケジューラーとmDNSを受信ノンブロッキングで処理）
+            # 4&5. メインスレッドでのループ処理（スケジューラー、mDNS、LLMNRを受信ノンブロッキングで処理）
             import socket
             # mDNS初期化
             mdns_sock = mdns_server._setup_socket()
+            # LLMNR初期化（Windows PC単体での代理応答を確実に成功させるための5355ポート待ち受け）
+            llmnr_sock = mdns_server.setup_socket_llmnr()
             
             # schedulerの初期化(初回実行のみ)は start に含まれていたが
-            # scheduler自体のThreadを使わずに回すための仕組みが必要
+            # scheduler自体のThreadを使わずに回すための仕組み必要
             last_schedule_time = time.time()
             
-            logger.info("Starting main loop for Pico (mDNS & Scheduler)...")
+            logger.info("Starting main loop for Pico (mDNS, LLMNR, API & Scheduler)...")
             while True:
+                # API Server 処理（シングルスレッド・ノンブロッキング処理、core1を完全に解放）
+                if server:
+                    try:
+                        server.tick()
+                    except Exception as e:
+                        logger.error(f"API Server Error in main loop: {e}")
+
                 # mDNS処理(ノンブロッキング)
                 if mdns_sock:
                     try:
-                        mdns_sock.settimeout(0.1) # 100msでタイムアウトさせる
+                        mdns_sock.settimeout(0.05) # 50msでタイムアウトさせる
                         data, addr = mdns_sock.recvfrom(4096)
                         mdns_server._handle_query(db, mdns_sock, data, addr, sys_config)
-                    except OSError as e:
-                        # errno 110: ETIMEDOUT (MicroPython)
+                    except OSError:
                         pass
                     except Exception as e:
                         logger.error(f"mDNS Error in main loop: {e}")
+
+                # LLMNR処理(ノンブロッキング)
+                if llmnr_sock:
+                    try:
+                        llmnr_sock.settimeout(0.05) # 50msでタイムアウトさせる
+                        data, addr = llmnr_sock.recvfrom(1024)
+                        mdns_server.handle_query_llmnr(db, llmnr_sock, data, addr, sys_config)
+                    except OSError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"LLMNR Error in main loop: {e}")
 
                 # Scheduler処理 (30秒間隔等)
                 current_time = time.time()
