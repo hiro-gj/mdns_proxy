@@ -226,7 +226,7 @@ def main():
         for wifi_loop in range(5):
             success = wifi_manager.connect(
                 sys_config.get('network', 'wifi_ssid'), 
-                sys_config.get('network', 'wifi_password'),
+                sys_config.get('network', 'wifi_password_encrypted'),
                 hostname=hostname_clean,
                 retries=3,
                 retry_interval=10

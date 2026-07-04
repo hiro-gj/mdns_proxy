@@ -335,8 +335,8 @@ def update_wifi_settings(target_dir):
                     new_lines.append(f"mdns_hostname = {hostname}\n\n")
                     inserted_hostname = True
                 new_lines.append(f"wifi_ssid = {ssid}\n")
-            elif line.strip().startswith("wifi_password ="):
-                new_lines.append(f"wifi_password = {encoded_password}\n")
+            elif line.strip().startswith("wifi_password =") or line.strip().startswith("wifi_password_encrypted ="):
+                new_lines.append(f"wifi_password_encrypted = {encoded_password}\n")
             elif line.strip().startswith("mdns_hostname ="):
                 if hostname:
                     new_lines.append(f"mdns_hostname = {hostname}\n")
