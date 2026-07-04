@@ -14,7 +14,7 @@ CLASS_IN = 1
 CLASS_FLUSH_IN = 0x8001
 
 def load_system_ini_proxy_url():
-    # 同階層、ツールディレクトリ、または1_repocopy内の system.ini から external_proxies を動的抽出する
+    # system.ini から external_proxies を動的抽出する
     # このスクリプトの位置 (setup/Windows/mDNS-Proxy-Windows-Beta.py) からプロジェクトルートの system.ini を探す
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ini_path = os.path.join(base_dir, 'system.ini')
@@ -45,7 +45,7 @@ def load_system_ini_proxy_url():
                             proxies_str = val.strip()
                             if proxies_str:
                                 # カンマ区切りの最初のプロキシを使用する（PicoW実機のホスト名やIPが記述されていることを想定）
-                                # ※ 動的にPicoのホスト名「ctd-mdns-pico1.local:80」などをパースします
+                                # ※ 動的にPicoのホスト名「pico-host.local:80」などをパースします
                                 first_proxy = proxies_str.split(',')[0].strip()
                                 # もし最初のプロキシが自分自身等で都合が悪い場合は、もう一方を取得
                                 if ('localhost' in first_proxy or '127.0.0.1' in first_proxy) and len(proxies_str.split(',')) > 1:
