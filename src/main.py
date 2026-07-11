@@ -168,9 +168,12 @@ def main():
                                 if line.startswith('[') and line.endswith(']'):
                                     current_section = line[1:-1]
                                     self._data[current_section] = {}
-                                elif '=' in line and current_section:
-                                    key, val = line.split('=', 1)
-                                    self._data[current_section][key.strip()] = val.strip()
+                                elif current_section:
+                                    if '=' in line:
+                                        key, val = line.split('=', 1)
+                                        self._data[current_section][key.strip()] = val.strip()
+                                    else:
+                                        self._data[current_section][line.strip()] = None
                     except Exception as ex:
                         logger.error(f"DummyConfig failed to read {filepath}: {ex}")
 

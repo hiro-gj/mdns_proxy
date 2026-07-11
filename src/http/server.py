@@ -129,6 +129,9 @@ class HTTPServer:
             return
         try:
             client_sock, client_addr = self.socket.accept()
+            # accept() で生成されたクライアントソケットに明示的にタイムアウトを設定
+            # （MicroPythonの一部ポートではリスナーのタイムアウトが継承されないため）
+            client_sock.settimeout(0.01)
             # スレッドを使用せず、シングルスレッドで直列に接続を処理
             self._handle_client(client_sock, client_addr)
         except OSError:

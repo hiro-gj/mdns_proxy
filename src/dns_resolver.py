@@ -21,7 +21,7 @@ def resolve_all(db, sys_config):
                 ip = static_ip
                 method = 'static'
             else:
-                ip, method = _resolve_host(hostname, db)
+                ip, method = _resolve_host(hostname, db, sys_config)
                 
             if ip:
                 # ループバックアドレスの除外
@@ -44,7 +44,17 @@ def resolve_all(db, sys_config):
         
         conn.commit()
 
-def _resolve_host(hostname, db=None):
+def _resolve_host(hostname, db=None, sys_config=None):
+    # 自ノード名（自分自身）の場合は、自身のIPアドレスを直接返す（名前解決ループの防止および解決成功の確保）
+    if sys_config and sys_config.has_option('network', 'mdns_hostname'):
+        my_hostname = sys_config.get('network', 'mdns_hostname')
+        clean_hostname = hostname[:-6] if hostname.endswith('.local') else hostname
+        clean_my_hostname = my_hostname[:-6] if my_hostname.endswith('.local') else my_hostname
+        if clean_hostname.lower() == clean_my_hostname.lower():
+            import mdns_server
+            my_ips = mdns_server._get_my_ips()
+            if my_ips:
+                return my_ips[0], 'self_ip'
     """
     複数手法で名前解決を試みる。
     OSキャッシュや自分自身のmDNS Proxyが返した古いレコードを誤って再解決（自己参照ループ）するのを防ぐため、
@@ -55,7 +65,8 @@ def _resolve_host(hostname, db=None):
         try:
             with db.connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('SELECT ip_address FROM merged_records WHERE hostname = ?', (hostname,))
+                # 自己参照ループ防止: 外部ソースのみ(source_type='other')を検索対象とする
+                cursor.execute('SELECT ip_address FROM merged_records WHERE hostname = ? AND source_type = ?', (hostname, 'other'))
                 row = cursor.fetchone()
                 if row:
                     return row[0], 'db_merged'

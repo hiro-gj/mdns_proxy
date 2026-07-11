@@ -141,6 +141,14 @@ def _sync_to_others(db, sys_config):
     my_node_id = _get_node_id(sys_config)
     my_port = sys_config.get('system', 'port', fallback='53080')
 
+    is_pico = False
+    try:
+        import urequests
+        is_pico = True
+    except ImportError:
+        import urllib.request
+        import json
+
     with db.connection() as conn:
         cursor = conn.cursor()
         
@@ -183,7 +191,8 @@ def _sync_to_others(db, sys_config):
             static_hosts.append({"hostname": row[0]})
         
         # 同期先プロキシの取得
-        cursor.execute('SELECT node_id, ip_address, port FROM other_proxies WHERE is_active = 1')
+        # MicroPython SQLite3の適合性差異(is_active=1がTrueレコードを引けない)に対応するため、WHERE is_active とする
+        cursor.execute('SELECT node_id, ip_address, port FROM other_proxies WHERE is_active')
         proxies = cursor.fetchall()
         
     if not proxies:
@@ -192,11 +201,21 @@ def _sync_to_others(db, sys_config):
     token_prefix = sys_config.get('system', 'token_prefix', fallback='mDNSProxy_')
     import socket
     # ホスト名が衝突しても一意性を保つため、UUIDベースの短縮ID(node_id)を組み合わせる
-    token = f"{token_prefix}{socket.gethostname()}_{my_node_id}"
+    try:
+        hostname_val = socket.gethostname()
+    except AttributeError:
+        # MicroPython (Pico) では socket.gethostname がないため、INI内のホスト名でフォールバック
+        hostname_val = sys_config.get('network', 'mdns_hostname', fallback='mdns-pico')
+    token = f"{token_prefix}{hostname_val}_{my_node_id}"
     
     # other-records 送信
     if records:
-        data_records = json.dumps({"records": records}).encode('utf-8')
+        if is_pico:
+            import json
+            data_records = json.dumps({"records": records}).encode('utf-8')
+        else:
+            data_records = json.dumps({"records": records}).encode('utf-8')
+
         for dest_node_id, proxy_ip, port in proxies:
             # 自ノードへの送信ループバックを防止
             if dest_node_id == my_node_id:
@@ -214,22 +233,41 @@ def _sync_to_others(db, sys_config):
                 actual_port = port
 
             url = f"http://{actual_ip}:{actual_port}/api/other-records"
-            req = urllib.request.Request(url, data=data_records, method='POST')
-            req.add_header('Content-Type', 'application/json')
-            req.add_header('Authorization', f'Token {token}')
-            req.add_header('X-Sender-Node-ID', my_node_id)
-            req.add_header('X-Sender-Port', str(my_port))
-            req.add_header('Content-Length', str(len(data_records)))
-            
-            try:
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    pass
-            except Exception as e:
-                logger.error(f"[_sync_to_others] Failed to sync records with {actual_ip}:{actual_port}: {e}")
+
+            if is_pico:
+                try:
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Token {token}',
+                        'X-Sender-Node-ID': my_node_id,
+                        'X-Sender-Port': str(my_port)
+                    }
+                    res = urequests.post(url, data=data_records, headers=headers, timeout=5)
+                    res.close()
+                except Exception as e:
+                    logger.error(f"[_sync_to_others] Pico POST failed to {actual_ip}:{actual_port}: {e}")
+            else:
+                req = urllib.request.Request(url, data=data_records, method='POST')
+                req.add_header('Content-Type', 'application/json')
+                req.add_header('Authorization', f'Token {token}')
+                req.add_header('X-Sender-Node-ID', my_node_id)
+                req.add_header('X-Sender-Port', str(my_port))
+                req.add_header('Content-Length', str(len(data_records)))
+                
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        pass
+                except Exception as e:
+                    logger.error(f"[_sync_to_others] Failed to sync records with {actual_ip}:{actual_port}: {e}")
 
     # static-hosts 送信
     if static_hosts:
-        data_hosts = json.dumps({"hosts": static_hosts}).encode('utf-8')
+        if is_pico:
+            import json
+            data_hosts = json.dumps({"hosts": static_hosts}).encode('utf-8')
+        else:
+            data_hosts = json.dumps({"hosts": static_hosts}).encode('utf-8')
+
         for dest_node_id, proxy_ip, port in proxies:
             if dest_node_id == my_node_id:
                 continue
@@ -246,18 +284,32 @@ def _sync_to_others(db, sys_config):
                 actual_port = port
 
             url = f"http://{actual_ip}:{actual_port}/api/static-hosts"
-            req = urllib.request.Request(url, data=data_hosts, method='POST')
-            req.add_header('Content-Type', 'application/json')
-            req.add_header('Authorization', f'Token {token}')
-            req.add_header('X-Sender-Node-ID', my_node_id)
-            req.add_header('X-Sender-Port', str(my_port))
-            req.add_header('Content-Length', str(len(data_hosts)))
-            
-            try:
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    pass
-            except Exception as e:
-                logger.error(f"[_sync_to_others] Failed to sync static_hosts with {actual_ip}:{actual_port}: {e}")
+
+            if is_pico:
+                try:
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Token {token}',
+                        'X-Sender-Node-ID': my_node_id,
+                        'X-Sender-Port': str(my_port)
+                    }
+                    res = urequests.post(url, data=data_hosts, headers=headers, timeout=5)
+                    res.close()
+                except Exception as e:
+                    logger.error(f"[_sync_to_others] Pico static-hosts POST failed to {actual_ip}:{actual_port}: {e}")
+            else:
+                req = urllib.request.Request(url, data=data_hosts, method='POST')
+                req.add_header('Content-Type', 'application/json')
+                req.add_header('Authorization', f'Token {token}')
+                req.add_header('X-Sender-Node-ID', my_node_id)
+                req.add_header('X-Sender-Port', str(my_port))
+                req.add_header('Content-Length', str(len(data_hosts)))
+                
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        pass
+                except Exception as e:
+                    logger.error(f"[_sync_to_others] Failed to sync static_hosts with {actual_ip}:{actual_port}: {e}")
 
 def _get_my_ips_with_masks():
     import sys
@@ -394,7 +446,9 @@ def _merge_records(db):
             is_self = is_in_my_subnet(ip, my_ips_with_masks)
             source_type = 'self' if is_self else 'other'
             
-            priority = 2 if is_self else 3
+            # 他ノードから同期されたレコードは、同一サブネットであっても外部情報であるため
+            # 優先度は常に 3 (other) とし、自ノード解決(self_records)を最優先する
+            priority = 3
             
             candidates.append({
                 'hostname': hostname,
