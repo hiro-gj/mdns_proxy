@@ -67,6 +67,13 @@ def connect(ssid, password, hostname=None, retries=3, retry_interval=10):
                 logger.warning(f"Could not set hostname: {e}")
                 
         wlan = network.WLAN(network.STA_IF)
+
+        # CYW43チップのコールドリセット: 確実に一度OFFにしてからONに戻す
+        try:
+            wlan.active(False)
+            time.sleep(2)
+        except Exception:
+            pass
         wlan.active(True)
 
         # 省電力モードの無効化（Wi-Fi接続の安定化・数秒での切断対策）
@@ -82,7 +89,7 @@ def connect(ssid, password, hostname=None, retries=3, retry_interval=10):
             except Exception:
                 logger.warning(f"Could not disable power management: {e}")
                 
-        time.sleep(1) # wlan active後の安定化待ち
+        time.sleep(2) # wlan active後の安定化待ち（ステルスAPとのハンドシェイク成功率高めるため延長）
 
         try:
             import machine
@@ -111,8 +118,8 @@ def connect(ssid, password, hostname=None, retries=3, retry_interval=10):
                 
             wlan.connect(ssid, decoded_password)
             
-            # 接続待ちタイムアウト（15秒）
-            timeout = 15
+            # 接続待ちタイムアウト（ステルスAP対応: 1試行あたり最大45秒）
+            timeout = 45
             while not wlan.isconnected() and timeout > 0:
                 if led:
                     led.toggle()

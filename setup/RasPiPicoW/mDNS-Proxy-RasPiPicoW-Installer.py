@@ -166,6 +166,112 @@ class PureAES128:
         return ciphertext
 
 
+def _decrypt_pure_aes128(ciphertext: bytes, iv: bytes) -> bytes:
+    """
+    PureAES128 で暗号化されたデータを復号する（相互チェック用）。
+    """
+    # 外部ライブラリがある場合はそちらを優先
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives import padding
+        cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        pad_len = padded[-1]
+        return padded[:-pad_len]
+    except ImportError:
+        pass
+
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import unpad
+        cipher = AES.new(AES_KEY, AES.MODE_CBC, iv)
+        return unpad(cipher.decrypt(ciphertext), 16)
+    except ImportError:
+        pass
+
+    # Pure Python fallback: decrypt_cbc を実装
+    pure_aes = PureAES128(AES_KEY)
+    
+    # 逆シフト、逆サブバイト、逆ミックスカラムを実装
+    inv_s_box = [
+        0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+        0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+        0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+        0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+        0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+        0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+        0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+        0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+        0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+        0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+        0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+        0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+        0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+        0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+        0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+        0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
+    ]
+
+    def inv_sub_bytes(state):
+        for i in range(16):
+            state[i] = inv_s_box[state[i]]
+
+    def inv_shift_rows(state):
+        state[1], state[5], state[9], state[13] = state[13], state[1], state[5], state[9]
+        state[2], state[6], state[10], state[14] = state[10], state[14], state[2], state[6]
+        state[3], state[7], state[11], state[15] = state[7], state[11], state[15], state[3]
+
+    def galois_mul(a, b):
+        p = 0
+        for _ in range(8):
+            if b & 1:
+                p ^= a
+            hi = a & 0x80
+            a = (a << 1) & 0xff
+            if hi:
+                a ^= 0x1b
+            b >>= 1
+        return p
+
+    def inv_mix_columns(state):
+        for i in range(4):
+            col = state[i*4:(i+1)*4]
+            state[i*4]     = galois_mul(0x0e, col[0]) ^ galois_mul(0x0b, col[1]) ^ galois_mul(0x0d, col[2]) ^ galois_mul(0x09, col[3])
+            state[i*4 + 1] = galois_mul(0x09, col[0]) ^ galois_mul(0x0e, col[1]) ^ galois_mul(0x0b, col[2]) ^ galois_mul(0x0d, col[3])
+            state[i*4 + 2] = galois_mul(0x0d, col[0]) ^ galois_mul(0x09, col[1]) ^ galois_mul(0x0e, col[2]) ^ galois_mul(0x0b, col[3])
+            state[i*4 + 3] = galois_mul(0x0b, col[0]) ^ galois_mul(0x0d, col[1]) ^ galois_mul(0x09, col[2]) ^ galois_mul(0x0e, col[3])
+
+    def add_round_key(state, round_num):
+        rk = pure_aes.round_keys[round_num*16:(round_num+1)*16]
+        for i in range(16):
+            state[i] ^= rk[i]
+
+    def decrypt_block(block):
+        state = list(block)
+        add_round_key(state, 10)
+        for r in range(9, 0, -1):
+            inv_shift_rows(state)
+            inv_sub_bytes(state)
+            add_round_key(state, r)
+            inv_mix_columns(state)
+        inv_shift_rows(state)
+        inv_sub_bytes(state)
+        add_round_key(state, 0)
+        return bytes(state)
+
+    plaintext = b""
+    prev_block = iv
+    for i in range(0, len(ciphertext), 16):
+        block = ciphertext[i:i+16]
+        decrypted = decrypt_block(block)
+        plaintext += bytes(x ^ y for x, y in zip(decrypted, prev_block))
+        prev_block = block
+
+    pad_len = plaintext[-1]
+    return plaintext[:-pad_len]
+
+
 def encrypt_password(password: str) -> str:
     """
     AES-128-CBC でパスワードを暗号化し、Base64でエンコードして返す。
@@ -203,6 +309,19 @@ def encrypt_password(password: str) -> str:
     pure_aes = PureAES128(AES_KEY)
     ciphertext = pure_aes.encrypt_cbc(data, AES_IV)
     return base64.b64encode(ciphertext).decode('utf-8')
+
+
+def verify_encrypted_password(password: str, encrypted_b64: str) -> bool:
+    """
+    暗号化されたパスワードが、Pico側のwifi_manager.pyと同じロジックで復号できるか検証する。
+    """
+    try:
+        ciphertext = base64.b64decode(encrypted_b64)
+        decrypted = _decrypt_pure_aes128(ciphertext, AES_IV)
+        return decrypted.decode('utf-8') == password
+    except Exception as e:
+        print(f"[verify] 暗号化/復号の相互チェックに失敗しました: {e}")
+        return False
 
 
 def get_latest_release_url():
@@ -424,6 +543,94 @@ def check_pico_connection():
         PICO_PORT = None
         return False
 
+def test_wifi_on_pico(ssid: str, encrypted_password_b64: str, timeout: int = 60):
+    """
+    Pico W上でWi-Fi接続テストを実行する。
+    mpremote経由で接続スクリプトを実行し、接続成功/失敗を判定する。
+    """
+    if not check_pico_connection():
+        print("Pico Wが接続されていないため、Wi-Fi接続テストをスキップします。")
+        return False
+
+    test_script = f'''
+import network
+import time
+
+SSID = {repr(ssid)}
+PASS_ENC = {repr(encrypted_password_b64)}
+
+AES_KEY = b"mDNSProxyPicoKey"
+AES_IV  = b"mDNSProxyPico_IV"
+
+def pkcs7_unpad(data):
+    if not data:
+        raise ValueError("Data is empty")
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16:
+        raise ValueError("Invalid padding length")
+    for i in range(len(data) - pad_len, len(data)):
+        if data[i] != pad_len:
+            raise ValueError("Invalid padding byte")
+    return data[:-pad_len]
+
+def decrypt_password(enc_password_b64):
+    import binascii
+    try:
+        enc_data = binascii.a2b_base64(enc_password_b64)
+    except Exception:
+        return enc_password_b64
+    try:
+        import ucryptolib
+        cipher = ucryptolib.aes(AES_KEY, 2, AES_IV)
+        decrypted_padded = cipher.decrypt(enc_data)
+        decrypted = pkcs7_unpad(decrypted_padded)
+        return decrypted.decode('utf-8')
+    except Exception:
+        try:
+            return enc_data.decode('utf-8')
+        except Exception:
+            return enc_password_b64
+
+wlan = network.WLAN(network.STA_IF)
+wlan.active(False)
+time.sleep(2)
+wlan.active(True)
+try:
+    wlan.config(pm=0xa11140)
+except Exception:
+    pass
+
+decoded = decrypt_password(PASS_ENC)
+wlan.connect(SSID, decoded)
+
+timeout = {timeout}
+while not wlan.isconnected() and timeout > 0:
+    time.sleep(1)
+    timeout -= 1
+
+if wlan.isconnected():
+    print("WIFI_OK:", wlan.ifconfig()[0])
+else:
+    print("WIFI_FAIL")
+'''
+    print("Pico W上でWi-Fi接続テストを実行しています...")
+    try:
+        result = run_mpremote(["exec", test_script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result.stdout + result.stderr
+        if "WIFI_OK:" in output:
+            ip = output.split("WIFI_OK:")[1].strip().split()[0]
+            print(f"  [Wi-Fi接続テスト成功] Pico WのIP: {ip}")
+            return True
+        else:
+            print("  [Wi-Fi接続テスト失敗] Pico WはWi-Fiに接続できませんでした。")
+            if "WIFI_FAIL" in output:
+                print("  ヒント: SSIDまたはパスワードを確認してください。")
+            return False
+    except Exception as e:
+        print(f"  [Wi-Fi接続テストエラー] {e}")
+        return False
+
+
 def upload_to_pico(target_dir):
     if not check_pico_connection():
         return
@@ -508,6 +715,7 @@ def main():
         print("\n--- メニュー ---")
         print("1) 無線LANの設定")
         print("2) mdns_proxyのアップロード")
+        print("3) Wi-Fi接続テスト（Pico W上で実行）")
         print("q) 終了")
         
         choice = input("メニュー番号を選択してください: ").strip().lower()
@@ -516,6 +724,26 @@ def main():
             update_wifi_settings(target_dir)
         elif choice == "2":
             upload_to_pico(target_dir)
+        elif choice == "3":
+            # system.ini から設定を読み出してテスト
+            system_ini_path = os.path.join(target_dir, "system.ini")
+            test_ssid = None
+            test_pass = None
+            if os.path.exists(system_ini_path):
+                try:
+                    with open(system_ini_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("wifi_ssid ="):
+                                test_ssid = line.split("=", 1)[1].strip()
+                            elif line.startswith("wifi_password_encrypted ="):
+                                test_pass = line.split("=", 1)[1].strip()
+                except Exception:
+                    pass
+            if test_ssid and test_pass:
+                test_wifi_on_pico(test_ssid, test_pass)
+            else:
+                print("Wi-Fi設定が未入力です。先に「1) 無線LANの設定」を行ってください。")
         elif choice in ["q", "quit", "exit"]:
             print("プログラムを終了します。")
             break

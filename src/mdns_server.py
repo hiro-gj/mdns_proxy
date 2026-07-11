@@ -26,6 +26,8 @@ def start_listener(db, sys_config=None):
     if sys.platform == 'rp2' or not HAS_THREADING:
         if threading_fallback:
             threading_fallback.start_new_thread(_listen, (db, sys_config))
+            # Pico環境向けに、LLMNR (ポート5355) スレッドも同時に起動させて Windows からの ping pc-0194 単体解決を両立させます
+            threading_fallback.start_new_thread(listen_llmnr, (db, sys_config))
             return True
         else:
             # スレッドが使えない場合はメインスレッドでブロッキング実行する
@@ -34,9 +36,13 @@ def start_listener(db, sys_config=None):
     else:
         t = threading.Thread(target=_listen, args=(db, sys_config), daemon=True)
         t.start()
+        # 非Pico環境でもLLMNRを並行起動
+        t2 = threading.Thread(target=listen_llmnr, args=(db, sys_config), daemon=True)
+        t2.start()
         return t
 
 def _setup_socket():
+    from logger_config import logger
     import sys
     # UDPソケットの作成 (MicroPythonではsocket.IPPROTO_UDPが無い、または引数2つでもUDPになるためフォールバック)
     try:
@@ -55,6 +61,16 @@ def _setup_socket():
     except AttributeError:
         pass
         
+    # 自身のIPアドレスを取得
+    my_ip = ''
+    try:
+        import network
+        wlan = network.WLAN(network.STA_IF)
+        if wlan.isconnected():
+            my_ip = wlan.ifconfig()[0]
+    except Exception:
+        pass
+
     try:
         # Pico環境で既にOSが5353を掴んでいる場合は共有設定(SO_REUSEPORT相当)を利用してバインドを試みる
         if sys.platform == 'rp2':
@@ -64,65 +80,81 @@ def _setup_socket():
                 sock.setsockopt(socket.SOL_SOCKET, SO_REUSEPORT, 1)
             except Exception:
                 pass
-        sock.bind(('', MDNS_PORT))
+            
+            # 【超重要】lwIPスタック制限の解消：
+            # マルチキャストパケットを受信するため、ワイルドカードや個別IPではなく
+            # マルチキャストアドレスそのもの（224.0.0.251）に直接 bind します
+            try:
+                sock.bind((MDNS_ADDR, MDNS_PORT))
+                logger.info(f"[mDNS Server] Bound directly to multicast IP: {MDNS_ADDR}:{MDNS_PORT}")
+            except OSError:
+                try:
+                    sock.bind(('', MDNS_PORT))
+                    logger.info(f"[mDNS Server] Bound to wildcard: :{MDNS_PORT}")
+                except OSError:
+                    if my_ip:
+                        sock.bind((my_ip, MDNS_PORT))
+                        logger.info(f"[mDNS Server] Bound to device IP: {my_ip}:{MDNS_PORT}")
+                    else:
+                        sock.bind(('', MDNS_PORT))
+        else:
+            sock.bind(('', MDNS_PORT))
     except OSError as e:
         import time
-        from logger_config import logger
-        logger.warning(f"[mDNS Server] Port 5353 already in use. Retrying in 5 seconds... ({e})")
-        time.sleep(5)
+        logger.warning(f"[mDNS Server] Port 5353 already in use ({e}). Trying to bind on temporary port and rely on Multicast JOIN...")
         try:
-            sock.bind(('', MDNS_PORT))
-        except OSError as e2:
-            logger.error(f"[mDNS Server] Could not bind to port 5353: {e2}. Listening skipped, relying on OS mDNS.")
+            sock.bind(('', 0)) # 空きポートでバインド
+        except Exception as e2:
+            logger.error(f"[mDNS Server] Temporary bind fail: {e2}")
             return None
-    
-    from logger_config import logger
 
     # マルチキャストグループに参加 (MicroPythonの定数不在エラーも考慮)
     try:
-        # MicroPythonのsocketモジュールに定数がない場合は一般的な数値を直接指定する
         IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
-        IP_ADD_MEMBERSHIP = getattr(socket, 'IP_ADD_MEMBERSHIP', 1024) # MicroPythonでの標準値、または1024等
+        IP_ADD_MEMBERSHIP = getattr(socket, 'IP_ADD_MEMBERSHIP', 1024)
+        
+        # lwIPスタック制限の解消：後半4バイト（インターフェースIP）に 0.0.0.0 ではなく、
+        # 現在のアクティブな自身のWi-Fi IPを明示指定してJOINを確実に成功させます
         try:
-            mreq = socket.inet_aton(MDNS_ADDR) + socket.inet_aton('0.0.0.0')
+            m_if_ip = my_ip if my_ip else '0.0.0.0'
+            mreq = socket.inet_aton(MDNS_ADDR) + socket.inet_aton(m_if_ip)
             sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
         except Exception:
-            # もしinet_atonが無いなどの場合、4バイトのバイナリを直接構築
-            ip_bin = bytes([224, 0, 0, 251]) + bytes([0, 0, 0, 0])
-            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, ip_bin)
+            if my_ip:
+                ip_bytes = [int(p) for p in my_ip.split('.')]
+            else:
+                ip_bytes = [0, 0, 0, 0]
+            mreq_bin = bytes([224, 0, 0, 251]) + bytes(ip_bytes)
+            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_bin)
+        logger.info(f"[mDNS Server] Joined multicast group {MDNS_ADDR} using interface {my_ip if my_ip else '0.0.0.0'}")
     except Exception as e:
         logger.error(f"[mDNS Server] Failed to join multicast group: {e}")
         return None
 
     # マルチキャスト送信設定: IP_MULTICAST_IF（送信IF明示）とTTL=255（②対応）
+    # ※ Wi-Fi接続前に起動された場合は、IPが確定していないため送信IFの設定は遅延（またはスキップ）します。
     try:
+        IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
+        IP_MULTICAST_TTL = getattr(socket, 'IP_MULTICAST_TTL', 10)
+        sock.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 255)
+        
         tmp_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tmp_s.connect(('8.8.8.8', 80))
             primary_ip = tmp_s.getsockname()[0]
-        except Exception:
-            primary_ip = "0.0.0.0"
-        finally:
-            tmp_s.close()
-        
-        # Pico(MicroPython)環境ではinet_aton or IP_MULTICAST_IFが無い場合があるためtry-exceptで囲む
-        try:
-            IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
             IP_MULTICAST_IF = getattr(socket, 'IP_MULTICAST_IF', 9)
-            IP_MULTICAST_TTL = getattr(socket, 'IP_MULTICAST_TTL', 10)
-            
             try:
                 ip_aton = socket.inet_aton(primary_ip)
             except Exception:
                 ip_aton = bytes([int(p) for p in primary_ip.split('.')])
-                
             sock.setsockopt(IPPROTO_IP, IP_MULTICAST_IF, ip_aton)
-            sock.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 255)
             logger.info(f"[mDNS Server] Multicast send interface set to: {primary_ip}")
         except Exception:
             pass
+        finally:
+            tmp_s.close()
     except Exception as e:
-        logger.warning(f"[mDNS Server] Failed to set multicast send interface: {e}")
+        pass
 
     logger.info("[mDNS Server] Listening on UDP 5353...")
     return sock
@@ -139,6 +171,129 @@ def _listen(db, sys_config=None):
             _handle_query(db, sock, data, addr, sys_config)
         except Exception as e:
             logger.error(f"[mDNS Server] Error: {e}")
+
+def setup_socket_llmnr():
+    from logger_config import logger
+    import sys
+    # LLMNRポートは5355、マルチキャストIPは224.0.0.252
+    LLMNR_PORT = 5355
+    LLMNR_ADDR = "224.0.0.252"
+    
+    # 自身のIPアドレスを取得
+    my_ip = ''
+    try:
+        import network
+        wlan = network.WLAN(network.STA_IF)
+        if wlan.isconnected():
+            my_ip = wlan.ifconfig()[0]
+    except Exception:
+        pass
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            if sys.platform == 'rp2':
+                # lwIPマルチキャスト受信制限の解消：
+                # マルチキャストIPアドレスに直接 bind します
+                sock.bind((LLMNR_ADDR, LLMNR_PORT))
+                logger.info(f"[LLMNR Server] Bound directly to multicast IP: {LLMNR_ADDR}:{LLMNR_PORT}")
+            else:
+                sock.bind(('', LLMNR_PORT))
+        except Exception as e:
+            try:
+                sock.bind(('', LLMNR_PORT))
+            except Exception as e2:
+                logger.error(f"[LLMNR Server] Could not bind to port 5355: {e2}")
+                return None
+
+        # マルチキャストグループに参加
+        IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
+        IP_ADD_MEMBERSHIP = getattr(socket, 'IP_ADD_MEMBERSHIP', 1024)
+        try:
+            m_if_ip = my_ip if my_ip else '0.0.0.0'
+            mreq = socket.inet_aton(LLMNR_ADDR) + socket.inet_aton(m_if_ip)
+            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
+        except Exception:
+            if my_ip:
+                ip_bytes = [int(p) for p in my_ip.split('.')]
+            else:
+                ip_bytes = [0, 0, 0, 0]
+            mreq_bin = bytes([224, 0, 0, 252]) + bytes(ip_bytes)
+            sock.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_bin)
+            
+        logger.info(f"[LLMNR Server] Listening on UDP 5355 (Windows single-label resolution support) joined {LLMNR_ADDR}...")
+        return sock
+    except Exception as e:
+        logger.error(f"[LLMNR Server] Init fail: {e}")
+        return None
+
+def handle_query_llmnr(db, sock, data, addr, sys_config=None):
+    from logger_config import logger
+    import struct
+    try:
+        if len(data) < 12:
+            return
+        
+        tx_id, flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHHH", data[:12])
+        # クエリのみを処理
+        if flags & 0x8000:
+            return
+            
+        queried_hostname = _extract_hostname(data)
+        if not queried_hostname:
+            return
+            
+        # 単一ホスト解決 (.local やドメイン指定があれば除去)
+        base_name = queried_hostname.split('.')[0]
+        
+        ip = None
+        ttl = 30
+        
+        if db is not None:
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT ip_address, ttl FROM merged_records WHERE hostname = ? OR hostname = ?',
+                    (base_name, f"{base_name}.local")
+                )
+                row = cursor.fetchone()
+                if row:
+                    ip, ttl = row
+        
+        if ip:
+            ip_parts = ip.split('.')
+            ip_bytes = bytes([int(p) for p in ip_parts])
+            
+            # LLMNR 応答ヘッダの構築
+            resp_flags = 0x8000 # Response + No Error
+            header = struct.pack("!HHHHHH", tx_id, resp_flags, 1, 1, 0, 0)
+            
+            # Question Sectionのコピー
+            # ヘッダ直後の名前長さから質問セクションの終わりを特定
+            name_len = data[12]
+            q_end = 12 + 1 + name_len + 1 + 4 # Name + Null + Type(2) + Class(2)
+            question = data[12:q_end]
+            
+            # Answer Section: Name (圧縮ポインタ 0xC00C), Type A(1), Class IN(1), TTL(4B), RDLENGTH(2B)=4, IP(4B)
+            answer = struct.pack("!HHHLH4s", 0xC00C, 1, 1, ttl, 4, ip_bytes)
+            
+            sock.sendto(header + question + answer, addr)
+            logger.info(f"[LLMNR Server] Replied {queried_hostname} -> {ip} to {addr}")
+    except Exception as e:
+        logger.error(f"[LLMNR Server] Error: {e}")
+
+def listen_llmnr(db, sys_config=None):
+    sock = setup_socket_llmnr()
+    if not sock:
+        return
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            handle_query_llmnr(db, sock, data, addr, sys_config)
+        except Exception as e:
+            from logger_config import logger
+            logger.error(f"[LLMNR Server] Runtime Error: {e}")
 
 def _get_my_ips():
     import sys
@@ -247,7 +402,7 @@ def _handle_query(db, sock, data, addr, sys_config=None):
     if row:
         ip, ttl = row
         # 応答パケットの構築
-        response = _build_response(data, queried_hostname, ip, ttl)
+        response = _build_response(data, queried_hostname, ip, ttl, is_query_for_me)
         if response:
             from logger_config import logger
             # 受信用のソケット(5353ポートにバインド済み)を再利用して送信する
@@ -256,19 +411,9 @@ def _handle_query(db, sock, data, addr, sys_config=None):
                 # クエリ送信元へユニキャスト
                 sock.sendto(response, addr)
                 # mDNSマルチキャストグループへも送信（ポート5353）
-                # ここで IP_MULTICAST_IF の設定等が必要かもしれないが、簡易的に別ソケットから送信
+                # バインド済みのsockを再利用して送信元ポート5353を維持する
                 try:
-                    mc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    try:
-                        try:
-                            IPPROTO_IP = getattr(socket, 'IPPROTO_IP', 0)
-                            IP_MULTICAST_TTL = getattr(socket, 'IP_MULTICAST_TTL', 10)
-                            mc_sock.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 255)
-                        except Exception:
-                            pass
-                        mc_sock.sendto(response, ('224.0.0.251', 5353))
-                    finally:
-                        mc_sock.close()
+                    sock.sendto(response, (MDNS_ADDR, MDNS_PORT))
                 except Exception as me:
                     logger.warning(f"[mDNS Server] Failed to send multicast: {me}")
             except Exception as e:
@@ -308,7 +453,7 @@ def _extract_hostname(data):
         pass
     return None
 
-def _build_response(query_data, hostname, ip, ttl):
+def _build_response(query_data, hostname, ip, ttl, is_unique=False):
     from logger_config import logger
     try:
         # TTL値が無効な時の安全な補完（デフォルト値を120とする）
@@ -339,8 +484,10 @@ def _build_response(query_data, hostname, ip, ttl):
         # アンサーセクション
         # NAME: ヘッダー(12バイト)直後のQNAMEへのDNS圧縮ポインタ (0xC00C)
         ans_name = bytes([0xC0, 0x0C])
-        # Type A (1), Class IN (0x0001) - cache-flush bit なし（③対応）
-        type_class = (1).to_bytes(2, 'big') + (0x0001).to_bytes(2, 'big')
+        # Type A (1), Class IN (0x0001) または cache-flush付き (0x8001)
+        # 自身のホスト名（ユニークレコード）の場合はcache-flushビットを立てる
+        qclass = 0x8001 if is_unique else 0x0001
+        type_class = (1).to_bytes(2, 'big') + (qclass).to_bytes(2, 'big')
         
         # TTL
         ttl_bytes = ttl.to_bytes(4, 'big')

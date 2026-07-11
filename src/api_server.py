@@ -286,13 +286,31 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
 from logger_config import logger
 
 def start_server(db, sys_config, port=80):
+    import sys
     try:
         server = HTTPServer(('', port), mDNSProxyAPIHandler)
         server.db = db
         server.sys_config = sys_config
-        t = threading.Thread(target=server.serve_forever, daemon=True)
-        t.start()
-        logger.info(f"[API Server] Listening on port {port}...")
+        
+        # Pico(MicroPython)環境ではセカンドコア(core1)でのスレッド起動を完全に排除し、
+        # メインループ内のシングルスレッドで非同期に協調動作させます。
+        if sys.platform == 'rp2':
+            # ソケットのバインドとノンブロッキング化(s.settimeout(0.01))のみ行います
+            # ※ serve_forever() 内部に書かれているソケット初期化をここで行うか、
+            # 特化メソッドを用意して呼び出します。
+            s = HTTPServer.socket = None
+            import usocket as socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', port))
+            s.listen(5)
+            s.settimeout(0.01) # ノンブロッキング設定
+            server.socket = s
+            logger.info(f"[API Server] (Single-Core Non-blocking) Listening on port {port}...")
+        else:
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            logger.info(f"[API Server] Listening on port {port}...")
         return server
     except Exception as e:
         logger.error(f"[API Server] Failed to start: {e}")
