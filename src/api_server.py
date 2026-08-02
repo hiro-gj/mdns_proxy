@@ -76,34 +76,12 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                     # 外部プロキシIDの取得/登録
                     proxy_id = None
                     
-                    # 旧DBの UNIQUE(ip_address) 対策：
-                    # すでに同一 ip_address もしくは同一 ip_address:port が ip_address 列に入っているか、
-                    # または同一 IPアドレスのレコードが存在するか確認し、あればそちらを再利用する
-                    cursor.execute(
-                        '''
-                        SELECT proxy_id FROM other_proxies 
-                        WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
-                        ''', 
-                        (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
-                    )
-                    ip_row = cursor.fetchone()
-                    if ip_row:
-                        proxy_id = ip_row[0]
-                        cursor.execute(
-                            '''
-                            UPDATE other_proxies 
-                            SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
-                            WHERE proxy_id = ?
-                            ''',
-                            (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
-                        )
-
-                    if not proxy_id and sender_node_id:
+                    # 1. 最初に sender_node_id で検索する（node_id 制約違反を防止）
+                    if sender_node_id:
                         cursor.execute('SELECT proxy_id FROM other_proxies WHERE node_id = ?', (sender_node_id,))
                         row = cursor.fetchone()
                         if row:
                             proxy_id = row[0]
-                            # IP、ポート、トークン、last_seenをアップデート
                             cursor.execute(
                                 '''
                                 UPDATE other_proxies 
@@ -112,9 +90,30 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                                 ''',
                                 (self.client_address[0], sender_port, token, proxy_id)
                             )
-                    
+
+                    # 2. sender_node_id でヒットしなかった場合、同一 IPアドレス・ポートでの検索を試みる
                     if not proxy_id:
-                        # token で既存確認
+                        cursor.execute(
+                            '''
+                            SELECT proxy_id FROM other_proxies 
+                            WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
+                            ''', 
+                            (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
+                        )
+                        ip_row = cursor.fetchone()
+                        if ip_row:
+                            proxy_id = ip_row[0]
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
+                            )
+
+                    # 3. それでもヒットしなかった場合、token で検索する
+                    if not proxy_id:
                         cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
                         row = cursor.fetchone()
                         if row:
@@ -203,27 +202,8 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                     # 外部プロキシIDの取得/登録（必要に応じて）
                     proxy_id = None
                     
-                    # 旧DB UNIQUE 対策
-                    cursor.execute(
-                        '''
-                        SELECT proxy_id FROM other_proxies 
-                        WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
-                        ''', 
-                        (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
-                    )
-                    ip_row = cursor.fetchone()
-                    if ip_row:
-                        proxy_id = ip_row[0]
-                        cursor.execute(
-                            '''
-                            UPDATE other_proxies 
-                            SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
-                            WHERE proxy_id = ?
-                            ''',
-                            (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
-                        )
-
-                    if not proxy_id and sender_node_id:
+                    # 1. 最初に sender_node_id で検索する（node_id 制約違反を防止）
+                    if sender_node_id:
                         cursor.execute('SELECT proxy_id FROM other_proxies WHERE node_id = ?', (sender_node_id,))
                         row = cursor.fetchone()
                         if row:
@@ -236,7 +216,29 @@ class mDNSProxyAPIHandler(BaseHTTPRequestHandler):
                                 ''',
                                 (self.client_address[0], sender_port, token, proxy_id)
                             )
-                    
+
+                    # 2. sender_node_id でヒットしなかった場合、同一 IPアドレス・ポートでの検索を試みる
+                    if not proxy_id:
+                        cursor.execute(
+                            '''
+                            SELECT proxy_id FROM other_proxies 
+                            WHERE ip_address = ? OR ip_address = ? OR ip_address LIKE ?
+                            ''', 
+                            (self.client_address[0], f"{self.client_address[0]}:{sender_port}", f"{self.client_address[0]}%")
+                        )
+                        ip_row = cursor.fetchone()
+                        if ip_row:
+                            proxy_id = ip_row[0]
+                            cursor.execute(
+                                '''
+                                UPDATE other_proxies 
+                                SET node_id = ?, ip_address = ?, port = ?, token = ?, last_seen = CURRENT_TIMESTAMP, is_active = 1
+                                WHERE proxy_id = ?
+                                ''',
+                                (sender_node_id, self.client_address[0], sender_port, token, proxy_id)
+                            )
+
+                    # 3. それでもヒットしなかった場合、token で検索する
                     if not proxy_id:
                         cursor.execute('SELECT proxy_id FROM other_proxies WHERE token = ?', (token,))
                         row = cursor.fetchone()
