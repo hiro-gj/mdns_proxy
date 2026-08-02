@@ -42,5 +42,20 @@ if [ -d "$INSTALL_DIR" ]; then
     sudo rm -rf "$INSTALL_DIR"
 fi
 
+# /etc/mdns.allow の削除および /etc/nsswitch.conf の復元
+MDNS_ALLOW="/etc/mdns.allow"
+if [ -f "$MDNS_ALLOW" ]; then
+    echo "/etc/mdns.allow を削除しています..."
+    sudo rm -f "$MDNS_ALLOW"
+fi
+
+NSSWITCH="/etc/nsswitch.conf"
+if [ -f "$NSSWITCH" ]; then
+    if grep -q "mdns4 " "$NSSWITCH" || grep -q "mdns4$" "$NSSWITCH"; then
+        echo "$NSSWITCH の hosts 設定を mdns4_minimal [NOTFOUND=return] へ復元しています..."
+        sudo sed -i 's/mdns4/mdns4_minimal \[NOTFOUND=return\]/g' "$NSSWITCH"
+    fi
+fi
+
 echo "=== アンインストール完了 ==="
 echo "mDNS Proxy は正常に削除されました。"
