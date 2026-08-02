@@ -17,6 +17,36 @@ echo "[1/4] パッケージの更新と必要なツールのインストール..
 sudo apt -y update
 sudo apt -y install python3 python3-pip unzip curl jq
 
+# nss-mdns の設定（/etc/mdns.allow および /etc/nsswitch.conf）の自動調整
+echo "[+] /etc/mdns.allow および /etc/nsswitch.conf の設定状態を確認しています..."
+MDNS_ALLOW="/etc/mdns.allow"
+if [ ! -f "$MDNS_ALLOW" ]; then
+    echo "[+] $MDNS_ALLOW が存在しないため作成し、.local 設定を追加します..."
+    sudo bash -c "cat > $MDNS_ALLOW" << 'EOF'
+.local
+.local.
+EOF
+else
+    if ! grep -q "^\.local$" "$MDNS_ALLOW" && ! grep -q "^\.local\.$" "$MDNS_ALLOW"; then
+        echo "[+] $MDNS_ALLOW に .local 設定を追加します..."
+        sudo bash -c "cat >> $MDNS_ALLOW" << 'EOF'
+.local
+.local.
+EOF
+    else
+        echo "[+] $MDNS_ALLOW に既に .local 設定が存在します。"
+    fi
+fi
+
+NSSWITCH="/etc/nsswitch.conf"
+if [ -f "$NSSWITCH" ]; then
+    if grep -q "mdns4_minimal" "$NSSWITCH"; then
+        echo "[+] $NSSWITCH の hosts 設定を mdns4_minimal から mdns4 へ変更しています..."
+        sudo sed -i 's/mdns4_minimal \[NOTFOUND=return\]/mdns4/g' "$NSSWITCH"
+        sudo sed -i 's/mdns_minimal \[NOTFOUND=return\]/mdns/g' "$NSSWITCH"
+    fi
+fi
+
 echo "[2/4] ソースコードの取得と展開..."
 TMP_DIR=$(mktemp -d)
 ORIGINAL_PWD=$(pwd)
@@ -64,22 +94,71 @@ unzip -q mdns_proxy.zip
 sudo mkdir -p "$INSTALL_DIR"
 
 # 展開されたファイルの構造を自動判定してコピー
-if [ -d "src" ]; then
-  # zipの直下にsrcディレクトリがある場合（ディレクトリなしの直展開構成）
-  echo "[+] ZIPの直下にソースコードが格納されています。そのままコピーします。"
-  # 元の cp コマンドを踏襲して既存ファイルの上書き・コピー
-  sudo cp -r * "$INSTALL_DIR/"
-else
-  # zip内に親ディレクトリが存在する場合（例: mdns_proxy-develop/src など）
+# （既存の設定ファイル *.ini や DB ファイルを保護し、差分更新・上書き保護を実施）
+SRC_BASE="."
+if [ ! -d "src" ]; then
   EXTRACTED_DIR=$(ls -d */ | grep -v "mdns_proxy.zip" | head -n 1)
   if [ -n "$EXTRACTED_DIR" ] && [ -d "${EXTRACTED_DIR}src" ]; then
-    echo "[+] 親ディレクトリ [${EXTRACTED_DIR}] を検出しました。このディレクトリの中身をコピーします。"
-    sudo cp -r "${EXTRACTED_DIR}"* "$INSTALL_DIR/"
+    SRC_BASE="${EXTRACTED_DIR}"
   else
     echo "[-] ソースコード(srcディレクトリ)が見つかりませんでした。展開に失敗した可能性があります。"
     exit 1
   fi
 fi
+
+echo "[+] プログラム本体(src)のコピー..."
+if [ "$SRC_BASE" = "." ]; then
+  sudo cp -r src "$INSTALL_DIR/"
+else
+  sudo cp -r "${SRC_BASE}src" "$INSTALL_DIR/"
+fi
+
+echo "[+] 設定ファイルおよびデータベースの差分チェック..."
+# system.ini が既存の場合は上書きせず、無ければコピー
+if [ -f "$INSTALL_DIR/system.ini" ]; then
+  echo "[*] 既存の $INSTALL_DIR/system.ini を保持します（上書きしません）。"
+  if [ "$SRC_BASE" = "." ]; then
+    [ -f "system.ini" ] && sudo cp "system.ini" "$INSTALL_DIR/system.ini.sample"
+  else
+    [ -f "${SRC_BASE}system.ini" ] && sudo cp "${SRC_BASE}system.ini" "$INSTALL_DIR/system.ini.sample"
+  fi
+else
+  if [ "$SRC_BASE" = "." ]; then
+    [ -f "system.ini" ] && sudo cp "system.ini" "$INSTALL_DIR/system.ini"
+  else
+    [ -f "${SRC_BASE}system.ini" ] && sudo cp "${SRC_BASE}system.ini" "$INSTALL_DIR/system.ini"
+  fi
+fi
+
+# search_hosts.ini が既存の場合は上書きせず、無ければコピー
+if [ -f "$INSTALL_DIR/search_hosts.ini" ]; then
+  echo "[*] 既存の $INSTALL_DIR/search_hosts.ini を保持します（上書きしません）。"
+  if [ "$SRC_BASE" = "." ]; then
+    [ -f "search_hosts.ini" ] && sudo cp "search_hosts.ini" "$INSTALL_DIR/search_hosts.ini.sample"
+  else
+    [ -f "${SRC_BASE}search_hosts.ini" ] && sudo cp "${SRC_BASE}search_hosts.ini" "$INSTALL_DIR/search_hosts.ini.sample"
+  fi
+else
+  if [ "$SRC_BASE" = "." ]; then
+    [ -f "search_hosts.ini" ] && sudo cp "search_hosts.ini" "$INSTALL_DIR/search_hosts.ini"
+  else
+    [ -f "${SRC_BASE}search_hosts.ini" ] && sudo cp "${SRC_BASE}search_hosts.ini" "$INSTALL_DIR/search_hosts.ini"
+  fi
+fi
+
+# その他ルート直下の補助ファイル（LICENSE, README.md 等）の更新コピー
+SRC_FILES_PATH="$SRC_BASE"
+if [ "$SRC_BASE" = "." ]; then
+  SRC_FILES_PATH="./"
+fi
+for f in ${SRC_FILES_PATH}*; do
+  filename=$(basename "$f")
+  if [ "$filename" != "src" ] && [ "$filename" != "db" ] && [ "$filename" != "system.ini" ] && [ "$filename" != "search_hosts.ini" ] && [ "$filename" != "mdns_proxy.zip" ]; then
+    if [ -f "$f" ]; then
+      sudo cp "$f" "$INSTALL_DIR/"
+    fi
+  fi
+done
 
 # Linux環境では不要なPico用ポリフィルファイルを削除
 echo "[+] Linux環境向けにPico用ポリフィルファイルを削除します..."
