@@ -27,8 +27,22 @@ def _get_node_id(sys_config):
         logger.error(f"[_get_node_id] Failed to save node_id to system.ini: {e}")
     return node_id
 
+def _clear_dynamic_cache(db):
+    """サービス起動時に古い動的キャッシュレコードを破棄・初期化する"""
+    try:
+        with db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM self_records')
+            cursor.execute('DELETE FROM other_records')
+            cursor.execute('DELETE FROM merged_records')
+            conn.commit()
+            logger.info("[Scheduler] Cleared dynamic record tables (self_records, other_records, merged_records) on startup.")
+    except Exception as e:
+        logger.error(f"[Scheduler] Failed to clear dynamic cache on startup: {e}")
+
 def loop_task(db, sys_config):
-    # 起動時に一度マイグレーションを適用し、不整合な自ノード登録をクリーンアップする
+    # 起動時に古い動的キャッシュを完全に初期化し、不整合な自ノード登録をクリーンアップする
+    _clear_dynamic_cache(db)
     try:
         _clean_self_from_proxies(db, sys_config)
     except Exception as e:
@@ -38,6 +52,14 @@ def loop_task(db, sys_config):
         try:
             logger.info("[Scheduler] Running periodic tasks...")
             interval = int(sys_config.get('system', 'interval', fallback='30'))
+
+            # 0. search_hosts.ini の最新設定を static_hosts テーブルへ同期
+            try:
+                import config
+                hosts_cfg = config.load_hosts_config()
+                db.sync_static_hosts(hosts_cfg)
+            except Exception as ex_sync:
+                logger.error(f"[Scheduler] Failed to sync static_hosts from INI: {ex_sync}")
 
             # 1. TTL減算とクリーンアップ（期限切れを先に排除し、同期やマージへの混入を防ぐ）
             _cleanup_records(db, interval)
@@ -443,11 +465,9 @@ def _merge_records(db):
             if ip.startswith('127.') or ip == '::1':
                 continue
                 
-            is_self = is_in_my_subnet(ip, my_ips_with_masks)
-            source_type = 'self' if is_self else 'other'
-            
-            # 他ノードから同期されたレコードは、同一サブネットであっても外部情報であるため
-            # 優先度は常に 3 (other) とし、自ノード解決(self_records)を最優先する
+            # 他ノードから同期されたレコードは、同一サブネットであっても自ノードの直接解決ではなく外部情報であるため
+            # source_type は常に 'other'、優先度も常に 3 (other) とし、自ノード解決(self_records)を最優先する
+            source_type = 'other'
             priority = 3
             
             candidates.append({

@@ -26,6 +26,7 @@ def resolve_all(db, sys_config):
             if ip:
                 # ループバックアドレスの除外
                 if is_loopback(ip):
+                    cursor.execute('DELETE FROM self_records WHERE hostname = ?', (hostname,))
                     continue
                 ttl = int(sys_config.get('system', 'ttl', fallback='120'))
                 # 既存レコードがあれば更新、なければ追加
@@ -41,6 +42,9 @@ def resolve_all(db, sys_config):
                         INSERT INTO self_records (hostname, ip_address, record_type, ttl, resolution_method)
                         VALUES (?, ?, 'A', ?, ?)
                     ''', (hostname, ip, ttl, method))
+            else:
+                # 解決できなかった場合は古いレコードを削除して残存（ゾンビ化）を防ぐ
+                cursor.execute('DELETE FROM self_records WHERE hostname = ?', (hostname,))
         
         conn.commit()
 
@@ -57,22 +61,7 @@ def _resolve_host(hostname, db=None, sys_config=None):
                 return my_ips[0], 'self_ip'
     """
     複数手法で名前解決を試みる。
-    OSキャッシュや自分自身のmDNS Proxyが返した古いレコードを誤って再解決（自己参照ループ）するのを防ぐため、
-    システムのDNSリゾルバー（socket.gethostbyname）は使用せず、生mDNSクエリおよびpingのみで実在を確認する。
     """
-    # 0. 同期されたDB（merged_records）を最優先で検索する
-    if db:
-        try:
-            with db.connection() as conn:
-                cursor = conn.cursor()
-                # 自己参照ループ防止: 外部ソースのみ(source_type='other')を検索対象とする
-                cursor.execute('SELECT ip_address FROM merged_records WHERE hostname = ? AND source_type = ?', (hostname, 'other'))
-                row = cursor.fetchone()
-                if row:
-                    return row[0], 'db_merged'
-        except Exception:
-            pass
-
     ip = None
     method = None
 
