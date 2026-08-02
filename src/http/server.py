@@ -100,24 +100,48 @@ class HTTPServer:
         self.RequestHandlerClass = RequestHandlerClass
         self.db = None
         self.sys_config = None
+        self.socket = None
 
     def serve_forever(self):
+        # 注意: Picoの動作を完全に安定化させるため、スレッド（core1）を使用せず
+        # シングルスレッド・シングルコア(Core0のみ)で動かせるように非ブロッキング対応を行います。
+        # メインループ(main.py)から直接ノンブロッキングでtick()して回します。
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(self.server_address)
             s.listen(5)
+            s.settimeout(0.01) # ノンブロッキングに設定
+            self.socket = s
             print(f"HTTP Server serving on {self.server_address[0]}:{self.server_address[1]}")
         except Exception as e:
             print("Failed to bind HTTP server port:", e)
             return
 
         while True:
-            try:
-                client_sock, client_addr = s.accept()
-                _thread.start_new_thread(self._handle_client, (client_sock, client_addr))
-            except Exception as e:
-                print("HTTP Server accept loop error:", e)
+            self.tick()
+            import time
+            time.sleep(0.1)
+
+    def tick(self):
+        # メインループから手動で呼び出し、接続があれば直列（シングルコア）で処理
+        if not self.socket:
+            return
+        try:
+            client_sock, client_addr = self.socket.accept()
+            # accept() で生成されたクライアントソケットに明示的にタイムアウトを設定
+            # （MicroPythonの一部ポートではリスナーのタイムアウトが継承されないため）
+            client_sock.settimeout(0.01)
+            # スレッドを使用せず、シングルスレッドで直列に接続を処理
+            self._handle_client(client_sock, client_addr)
+        except OSError:
+            # 接続待ちタイムアウト（タイムアウト設定により必ずここに入りますが正常動作です）
+            pass
+        except Exception as e:
+            print("HTTP Server tick error:", e)
 
     def _handle_client(self, client_sock, client_addr):
-        self.RequestHandlerClass(client_sock, client_addr, self)
+        try:
+            self.RequestHandlerClass(client_sock, client_addr, self)
+        except Exception as e:
+            print("HTTP Server client handling error:", e)

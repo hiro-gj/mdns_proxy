@@ -21,7 +21,7 @@ def resolve_all(db, sys_config):
                 ip = static_ip
                 method = 'static'
             else:
-                ip, method = _resolve_host(hostname)
+                ip, method = _resolve_host(hostname, db, sys_config)
                 
             if ip:
                 # ループバックアドレスの除外
@@ -44,12 +44,35 @@ def resolve_all(db, sys_config):
         
         conn.commit()
 
-def _resolve_host(hostname):
+def _resolve_host(hostname, db=None, sys_config=None):
+    # 自ノード名（自分自身）の場合は、自身のIPアドレスを直接返す（名前解決ループの防止および解決成功の確保）
+    if sys_config and sys_config.has_option('network', 'mdns_hostname'):
+        my_hostname = sys_config.get('network', 'mdns_hostname')
+        clean_hostname = hostname[:-6] if hostname.endswith('.local') else hostname
+        clean_my_hostname = my_hostname[:-6] if my_hostname.endswith('.local') else my_hostname
+        if clean_hostname.lower() == clean_my_hostname.lower():
+            import mdns_server
+            my_ips = mdns_server._get_my_ips()
+            if my_ips:
+                return my_ips[0], 'self_ip'
     """
     複数手法で名前解決を試みる。
     OSキャッシュや自分自身のmDNS Proxyが返した古いレコードを誤って再解決（自己参照ループ）するのを防ぐため、
     システムのDNSリゾルバー（socket.gethostbyname）は使用せず、生mDNSクエリおよびpingのみで実在を確認する。
     """
+    # 0. 同期されたDB（merged_records）を最優先で検索する
+    if db:
+        try:
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                # 自己参照ループ防止: 外部ソースのみ(source_type='other')を検索対象とする
+                cursor.execute('SELECT ip_address FROM merged_records WHERE hostname = ? AND source_type = ?', (hostname, 'other'))
+                row = cursor.fetchone()
+                if row:
+                    return row[0], 'db_merged'
+        except Exception:
+            pass
+
     ip = None
     method = None
 
@@ -69,6 +92,10 @@ def _resolve_host(hostname):
             MDNS_PORT = 5353
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(2.0)
+            try:
+                sock.bind(('', 0))
+            except Exception:
+                pass
             
             # Build mDNS query packet
             tx_id = urandom.randint(0, 65535)
@@ -130,6 +157,10 @@ def _resolve_host(hostname):
                         if len(data) < 12:
                             continue
                         
+                        # 自ノードIP（送信元IP）からの応答は古いキャッシュ等の応答のためスキップ
+                        if addr[0] in my_ips:
+                            continue
+
                         tx_id_resp, flags, qdcount, ancount, nscount, arcount = struct.unpack('!HHHHHH', data[:12])
                         # Ensure it is a response
                         if (flags & 0x8000) == 0:
@@ -161,6 +192,7 @@ def _resolve_host(hostname):
                             if atype == 1 and rdlength == 4:
                                 if aname.lower() == qname.lower():
                                     ip_str = '.'.join(str(b) for b in rdata)
+                                    # 外部からの応答が得られたら即時返却
                                     return ip_str
                     except Exception:
                         pass
@@ -183,7 +215,10 @@ def _resolve_host(hostname):
             cmd = ['ping', '-n', '1', '-4', target]
         else:
             cmd = ['ping', '-c', '1', target]
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=2).decode('utf-8', errors='ignore')
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=2).decode('utf-8', errors='ignore')
+        except subprocess.CalledProcessError as e:
+            output = e.output.decode('utf-8', errors='ignore') if isinstance(e.output, bytes) else str(e.output)
         
         # pingの出力からIPアドレスを抽出 (例: 192.168.1.3)
         if os.name == 'nt':
@@ -196,7 +231,28 @@ def _resolve_host(hostname):
             if match:
                 ip = match.group(1)
                 method = 'ping'
+            elif 'PING ' in output:
+                # ping応答(ICMP reply)が届かなくても名前解決(PING header)で取得したIPを抽出
+                match = re.search(r'PING\s+[^\s]+\s+\((([0-9]{1,3}\.){3}[0-9]{1,3})\)', output)
+                if match:
+                    ip = match.group(1)
+                    method = 'ping'
     except Exception:
         pass
+
+    # 最終フォールバック: getent hosts または socket.gethostbyname (mDNS/OSリゾルバ経由)
+    if not ip:
+        try:
+            target = f"{hostname}.local" if not hostname.endswith('.local') else hostname
+            res_ip = socket.gethostbyname(target)
+            if res_ip and not is_loopback(res_ip):
+                import mdns_server
+                my_ips = set(mdns_server._get_my_ips() or [])
+                my_ips.add('127.0.0.1')
+                if res_ip not in my_ips:
+                    ip = res_ip
+                    method = 'os_resolver'
+        except Exception:
+            pass
 
     return ip, method

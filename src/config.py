@@ -1,11 +1,13 @@
 import os
-import configparser
 
 def get_base_dir():
     # src/ の親ディレクトリ（mdns_proxy/）を基準にする
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def load_system_config():
+    # configparser は MicroPython(Pico) には存在しないため、関数内で遅延インポートする。
+    # これにより get_base_dir() などの他関数は Pico 環境でも利用可能となる。
+    import configparser
     config = configparser.ConfigParser()
     path = os.path.join(get_base_dir(), 'system.ini')
     if os.path.exists(path):
@@ -24,6 +26,8 @@ def load_system_config():
     return config
 
 def load_hosts_config():
+    # configparser は MicroPython(Pico) には存在しないため、関数内で遅延インポートする。
+    import configparser
     config = configparser.ConfigParser(allow_no_value=True)
     path = os.path.join(get_base_dir(), 'search_hosts.ini')
     if os.path.exists(path):
