@@ -114,6 +114,27 @@ Windows向けにビルドされた `mdns_proxy.exe` をコマンドプロンプ�
 ### Linux (Ubuntu 24.04) の場合
 インストーラースクリプト `mDNS-Proxy-Ubuntu-Installer.sh` を使用して、簡単にセットアップとサービス登録ができます。
 
+> **【注意】Linuxクライアント端末での名前解決について:**
+> Ubuntu等のLinux環境において、mDNS Proxy経由で解決されるプライベートIPアドレス（`192.168.x.x`等）の `.local` ホスト名を名前解決（`ping xxx.local` 等）するには、NSSリゾルバ（`mdns4_minimal`）の制限を解除するため、以下2点の設定が必要です：
+> 
+> 1. `/etc/mdns.allow` ファイルを作成し、以下の記述を追加：
+>    ```text
+>    .local
+>    .local.
+>    ```
+>    **設定用ワンライナーコマンド:**
+>    ```bash
+>    sudo bash -c 'printf ".local\n.local.\n" > /etc/mdns.allow'
+>    ```
+> 
+> 2. `/etc/nsswitch.conf` の `hosts:` 行を `mdns4_minimal [NOTFOUND=return]` から `mdns4` に変更：
+>    **設定用ワンライナーコマンド:**
+>    ```bash
+>    sudo sed -i 's/mdns4_minimal \[NOTFOUND=return\]/mdns4/g' /etc/nsswitch.conf
+>    ```
+> 
+> ※ mDNS Proxyサーバとして本インストーラー（`mDNS-Proxy-Ubuntu-Installer.sh`）を実行する場合は、これらの設定および既存の設定ファイル（`system.ini`, `search_hosts.ini`）を上書きせず保持する差分更新が自動で行われます。mDNS Proxyをインストールしない一般 of Linuxクライアント端末で名前解決のみを行う場合には、上記の設定を手動（またはワンライナーコマンド）で行ってください。
+
 1. **インストーラーの実行**:
    リポジトリをクローンまたはダウンロードした後、以下のコマンドを実行します。
    ```bash
@@ -123,7 +144,8 @@ Windows向けにビルドされた `mdns_proxy.exe` をコマンドプロンプ�
 2. **セットアップ**:
    スクリプトが自動的に以下の作業を行います。
    - 必要なパッケージ（python3, pip）のインストール
-   - ファイルの `/opt/mdns_proxy` への配置
+   - `/etc/mdns.allow` および `/etc/nsswitch.conf` の自動設定（`mdns4` 化によるプライベートIP名前解決制限の解除）
+   - ファイルの `/opt/mdns_proxy` への配置（既存の `system.ini` や `search_hosts.ini` は保持・保護されます）
    - systemdサービスの作成と有効化
 3. **設定の編集**:
    インストール後、`/opt/mdns_proxy/system.ini` と `/opt/mdns_proxy/search_hosts.ini` を環境に合わせて編集してください。
@@ -186,7 +208,7 @@ Python環境がないWindows PCでも動作するように、PyInstallerを用�
 
 - **起動・停止ログ**: プログラムの起動時および終了時のメッセージ。
   - 出力例: `INFO - mDNS Proxy started on 0.0.0.0`
-- **エラー・警告ログ**: データベースのアクセスエラー、ネットワーク通信の失敗、設定ファイルの読み込みエラーなど。
+- **エラー・警告ログ**: データベース of アクセスエラー、ネットワーク通信の失敗、設定ファイルの読み込みエラーなど。
   - 出力例: `ERROR - Failed to connect to external proxy at 192.168.1.10`
 - **名前解決ログ**: ローカルネットワークでのmDNS名前解決リクエストおよびレスポンスの処理状況。
   - 出力例: `DEBUG - Resolved test-device1.local to 192.168.0.50`
