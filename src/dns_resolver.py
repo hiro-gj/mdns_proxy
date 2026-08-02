@@ -157,6 +157,10 @@ def _resolve_host(hostname, db=None, sys_config=None):
                         if len(data) < 12:
                             continue
                         
+                        # 自ノードIP（送信元IP）からの応答は古いキャッシュ等の応答のためスキップ
+                        if addr[0] in my_ips:
+                            continue
+
                         tx_id_resp, flags, qdcount, ancount, nscount, arcount = struct.unpack('!HHHHHH', data[:12])
                         # Ensure it is a response
                         if (flags & 0x8000) == 0:
@@ -188,6 +192,7 @@ def _resolve_host(hostname, db=None, sys_config=None):
                             if atype == 1 and rdlength == 4:
                                 if aname.lower() == qname.lower():
                                     ip_str = '.'.join(str(b) for b in rdata)
+                                    # 外部からの応答が得られたら即時返却
                                     return ip_str
                     except Exception:
                         pass
@@ -210,7 +215,10 @@ def _resolve_host(hostname, db=None, sys_config=None):
             cmd = ['ping', '-n', '1', '-4', target]
         else:
             cmd = ['ping', '-c', '1', target]
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=2).decode('utf-8', errors='ignore')
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=2).decode('utf-8', errors='ignore')
+        except subprocess.CalledProcessError as e:
+            output = e.output.decode('utf-8', errors='ignore') if isinstance(e.output, bytes) else str(e.output)
         
         # pingの出力からIPアドレスを抽出 (例: 192.168.1.3)
         if os.name == 'nt':
@@ -223,7 +231,28 @@ def _resolve_host(hostname, db=None, sys_config=None):
             if match:
                 ip = match.group(1)
                 method = 'ping'
+            elif 'PING ' in output:
+                # ping応答(ICMP reply)が届かなくても名前解決(PING header)で取得したIPを抽出
+                match = re.search(r'PING\s+[^\s]+\s+\((([0-9]{1,3}\.){3}[0-9]{1,3})\)', output)
+                if match:
+                    ip = match.group(1)
+                    method = 'ping'
     except Exception:
         pass
+
+    # 最終フォールバック: getent hosts または socket.gethostbyname (mDNS/OSリゾルバ経由)
+    if not ip:
+        try:
+            target = f"{hostname}.local" if not hostname.endswith('.local') else hostname
+            res_ip = socket.gethostbyname(target)
+            if res_ip and not is_loopback(res_ip):
+                import mdns_server
+                my_ips = set(mdns_server._get_my_ips() or [])
+                my_ips.add('127.0.0.1')
+                if res_ip not in my_ips:
+                    ip = res_ip
+                    method = 'os_resolver'
+        except Exception:
+            pass
 
     return ip, method
